@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: capacity (router -> coordinator)",
+  "description": "Sent on any membership/capacity change: a model loaded, unloaded, or excluded, a slot count change, or a VRAM change. The coordinator recomputes class advertisement from the latest capacity of connected routers (D-B7, D-C3).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"capacity\".",
+      "type": "string",
+      "const": "capacity"
+    },
+    "payload": {
+      "description": "Capacity payload.",
+      "type": "object",
+      "properties": {
+        "router_id": {
+          "description": "Router_id of the sending router (as in handshake).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "models": {
+          "description": "Full current model list of this router (not a diff).",
+          "type": "array",
+          "items": {
+            "description": "One local model's capacity record.",
+            "type": "object",
+            "properties": {
+              "model_id": {
+                "description": "Local model id (llama.cpp model name) on this router.",
+                "type": "string",
+                "minLength": 1
+              },
+              "tags": {
+                "description": "Pool classes (tags) this model serves, e.g. [\"pool-text-lg\"].",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "n_ctx": {
+                "description": "Context window the member runs this model with.",
+                "type": "integer",
+                "minimum": 1
+              },
+              "n_embd": {
+                "description": "Embedding dimension (informational).",
+                "type": "integer",
+                "minimum": 1
+              },
+              "n_slots": {
+                "description": "Parallel slots configured for this model.",
+                "type": "integer",
+                "minimum": 1
+              },
+              "busy_slots": {
+                "description": "Slots currently in use.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "status": {
+                "description": "loaded = serving pool classes; excluded = owner excluded it from pool dispatch (D-F1).",
+                "type": "string",
+                "enum": ["loaded", "excluded"]
+              },
+              "vram_mb": {
+                "description": "VRAM used by this model, in MiB; null if the member cannot report it.",
+                "type": ["integer", "null"],
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": ["model_id", "tags", "n_ctx", "n_embd", "n_slots", "busy_slots", "status", "vram_mb"]
+          }
+        },
+        "updated_at": {
+          "description": "When this snapshot was taken, RFC 3339 (e.g. 2026-10-30T07:00:00Z).",
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["router_id", "models", "updated_at"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

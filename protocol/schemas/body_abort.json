@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: body_abort (router -> coordinator)",
+  "description": "Sent after offer_accept when the router aborts the body stream (GET /pool/jobs/{job_id}/body) before or during transfer, e.g. the model was unloaded mid-transfer. Aborting the stream = closing the HTTP stream; this envelope tells the coordinator the job did not take the body.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"body_abort\".",
+      "type": "string",
+      "const": "body_abort"
+    },
+    "payload": {
+      "description": "Body abort payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Job id of the aborted body pull.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "description": "model_gone: model unloaded mid-transfer; no_slot: slot became unavailable; evicted: model evicted; other: anything else.",
+          "type": "string",
+          "enum": ["model_gone", "no_slot", "evicted", "other"]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "reason"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

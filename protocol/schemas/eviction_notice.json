@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: eviction_notice (router -> coordinator)",
+  "description": "A local model was unloaded by its owner. Queued/offered jobs that named this model are gone: the coordinator drops them from candidacy and (for pre-token stages) may re-dispatch within the class (D-G1). Also invalidates skip/pin for this model (D-E4).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"eviction_notice\".",
+      "type": "string",
+      "const": "eviction_notice"
+    },
+    "payload": {
+      "description": "Eviction notice payload.",
+      "type": "object",
+      "properties": {
+        "router_id": {
+          "description": "Router_id of the sending router (as in handshake).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "model_id": {
+          "description": "Local model id that was unloaded.",
+          "type": "string",
+          "minLength": 1
+        },
+        "evicted_jobs": {
+          "description": "Job ids that were queued or offered on this model and are now gone. May be empty if the router does not track them.",
+          "type": "array",
+          "items": {
+            "description": "A job id.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "reason": {
+          "description": "owner_unload: the owner unloaded the model (normal); other: anything else.",
+          "type": "string",
+          "enum": ["owner_unload", "other"]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["router_id", "model_id", "evicted_jobs", "reason"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

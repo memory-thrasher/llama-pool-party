@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: work_offer (coordinator -> router)",
+  "description": "Phase 1 of two-phase dispatch (D-D2): the coordinator offers a queued job to a candidate router. The router answers with offer_accept (short lease) or offer_reject (coordinator moves to the next candidate WITHOUT transferring the body). No prompt/response content is carried here.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"work_offer\".",
+      "type": "string",
+      "const": "work_offer"
+    },
+    "payload": {
+      "description": "Work offer payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Unique id of the queued job (assigned by the coordinator at intake).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "tag": {
+          "description": "Pool class/tag the job requests, e.g. \"pool-text-lg\".",
+          "type": "string",
+          "minLength": 1
+        },
+        "est_prompt_tokens": {
+          "description": "Estimated prompt size in tokens (from intake; never derived from body content by the coordinator).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "est_ctx_needed": {
+          "description": "Context length the request is expected to need (prompt + expected response); drives member selection (D-D4) and overflow pre-checks.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "deadline_ms": {
+          "description": "Service deadline in milliseconds (relative to dispatch), or null if the job has none.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "priority": {
+          "description": "live = interactive request; batch = async batch item (always lower priority than live, D-F4).",
+          "type": "string",
+          "enum": ["live", "batch"]
+        },
+        "source": {
+          "description": "How this job reached dispatch: queue = normal queue; skip = skip-the-line continuation (D-E2); pin = soft pin on the last-serving member (D-E3).",
+          "type": "string",
+          "enum": ["queue", "skip", "pin"]
+        },
+        "conv_key": {
+          "description": "Continuity key if known: SHA-256 (64 hex) of the first 8 KiB of the raw client payload (D-E1). null for new conversations and batch items.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "tag", "est_prompt_tokens", "est_ctx_needed", "deadline_ms", "priority", "source", "conv_key"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

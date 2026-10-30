@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: offer_accept (router -> coordinator)",
+  "description": "Phase 1 of two-phase dispatch (D-D2): the router commits to the offered job under a short lease. After accept, the router pulls the body via GET /pool/jobs/{job_id}/body (phase 2) and may abort it (body_abort).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"offer_accept\".",
+      "type": "string",
+      "const": "offer_accept"
+    },
+    "payload": {
+      "description": "Offer accept payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Job id from the work_offer being accepted.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "lease_ms": {
+          "description": "Short lease in ms: how long the router commits to this job (pull the body and start service) before the coordinator may treat the accept as expired and re-offer. Typical: 5000.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "model_id": {
+          "description": "Which local model on this router will serve the job.",
+          "type": "string",
+          "minLength": 1
+        },
+        "n_ctx": {
+          "description": "The member's real context window for that model (the coordinator uses it for the max_tokens clamp, D-C6).",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "lease_ms", "model_id", "n_ctx"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

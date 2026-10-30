@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: handshake (router -> coordinator)",
+  "description": "First envelope the router sends right after GET /pool/subscribe connects, before any other message. Carries the protocol version, router identity, and the initial capacity snapshot.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"handshake\".",
+      "type": "string",
+      "const": "handshake"
+    },
+    "payload": {
+      "description": "Handshake payload.",
+      "type": "object",
+      "properties": {
+        "proto": {
+          "description": "Protocol version spoken by this router. Protocol v1 = 1; the coordinator may reject older versions (D-J6).",
+          "type": "integer",
+          "const": 1
+        },
+        "router_id": {
+          "description": "Stable UUIDv4 the router generated once and persists across restarts. Identifies this router; echoed back as completion.payload.served_by.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "router_name": {
+          "description": "Owner-chosen display name for this router (shown in the portal).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "software": {
+          "description": "Router software version string, e.g. \"llama.cpp b11827-pool\".",
+          "type": "string",
+          "minLength": 1
+        },
+        "models": {
+          "description": "Initial capacity snapshot. Same shape as capacity.payload.models.",
+          "type": "array",
+          "items": {
+            "description": "One local model's capacity record.",
+            "type": "object",
+            "properties": {
+              "model_id": {
+                "description": "Local model id (llama.cpp model name) on this router.",
+                "type": "string",
+                "minLength": 1
+              },
+              "tags": {
+                "description": "Pool classes (tags) this model serves, e.g. [\"pool-text-lg\"].",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "n_ctx": {
+                "description": "Context window the member runs this model with.",
+                "type": "integer",
+                "minimum": 1
+              },
+              "n_embd": {
+                "description": "Embedding dimension (informational).",
+                "type": "integer",
+                "minimum": 1
+              },
+              "n_slots": {
+                "description": "Parallel slots configured for this model.",
+                "type": "integer",
+                "minimum": 1
+              },
+              "busy_slots": {
+                "description": "Slots currently in use.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "status": {
+                "description": "loaded = serving pool classes; excluded = owner excluded it from pool dispatch (D-F1).",
+                "type": "string",
+                "enum": ["loaded", "excluded"]
+              },
+              "vram_mb": {
+                "description": "VRAM used by this model, in MiB; null if the member cannot report it.",
+                "type": ["integer", "null"],
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": ["model_id", "tags", "n_ctx", "n_embd", "n_slots", "busy_slots", "status", "vram_mb"]
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": ["proto", "router_id", "router_name", "software", "models"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

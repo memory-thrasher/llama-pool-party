@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: exclusion_update (router -> coordinator)",
+  "description": "D-F1: the owner marked a model excluded (/models/unload on the pool member entry = mark in the owner's config) or un-excluded (/models/load on an excluded model). The coordinator avoids dispatching this owner's class requests to an excluded model. Explicit model-id requests bypass the mark.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"exclusion_update\".",
+      "type": "string",
+      "const": "exclusion_update"
+    },
+    "payload": {
+      "description": "Exclusion update payload.",
+      "type": "object",
+      "properties": {
+        "router_id": {
+          "description": "Router_id of the sending router (as in handshake).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "model_id": {
+          "description": "Local model id that was marked or un-marked.",
+          "type": "string",
+          "minLength": 1
+        },
+        "excluded": {
+          "description": "true = model is now excluded from pool dispatch for this owner; false = exclusion removed (model serves pool classes again).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["router_id", "model_id", "excluded"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

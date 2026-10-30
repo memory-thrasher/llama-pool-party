@@ -1,0 +1,9 @@
+{
+  "type": "offer_accept",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000001",
+    "lease_ms": 5000,
+    "model_id": "qwen3-14b-q4_k_m",
+    "n_ctx": 32768
+  }
+}

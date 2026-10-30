@@ -1,0 +1,13 @@
+{
+  "type": "work_offer",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000001",
+    "tag": "pool-text-lg",
+    "est_prompt_tokens": 1200,
+    "est_ctx_needed": 4096,
+    "deadline_ms": null,
+    "priority": "live",
+    "source": "queue",
+    "conv_key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+  }
+}

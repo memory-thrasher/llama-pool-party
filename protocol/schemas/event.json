@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 event envelope",
+  "description": "Envelope for every pool protocol message. Router -> coordinator messages are POSTed to /pool/events as this envelope; coordinator -> router messages arrive as SSE data: lines on the held-open GET /pool/subscribe with the same envelope. \"type\" selects the payload schema: schemas/<type>.json defines the full envelope for one message type. Heartbeats are SSE comment lines (\": hb <unix_ms>\"), not envelopes.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Message type. Stable, snake_case. Closed set for protocol v1; new types require a protocol bump (D-J6).",
+      "type": "string",
+      "enum": [
+        "handshake",
+        "capacity",
+        "work_offer",
+        "offer_accept",
+        "offer_reject",
+        "body_abort",
+        "completion",
+        "error",
+        "affinity_report",
+        "exclusion_update",
+        "eviction_notice"
+      ]
+    },
+    "payload": {
+      "description": "Type-specific payload object. Its shape is defined by the \"payload\" property of schemas/<type>.json.",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

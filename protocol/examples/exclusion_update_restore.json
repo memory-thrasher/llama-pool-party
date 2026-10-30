@@ -1,0 +1,8 @@
+{
+  "type": "exclusion_update",
+  "payload": {
+    "router_id": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c",
+    "model_id": "llama3.2-3b-instruct-q8_0",
+    "excluded": false
+  }
+}

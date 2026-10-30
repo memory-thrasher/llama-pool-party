@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: completion (router -> coordinator)",
+  "description": "A served job finished. Feeds the per-request records (D-I3) and, via idle_ms_hint, the skip-the-line / soft-pin logic (D-E2, D-E3). ok is always true here; failures are reported with the \"error\" message. Anti-memory: token counts and timings only, never prompt/response content (D-I1).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"completion\".",
+      "type": "string",
+      "const": "completion"
+    },
+    "payload": {
+      "description": "Completion payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Job id that completed.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "ok": {
+          "description": "Always true in a completion (failures use the \"error\" message).",
+          "type": "boolean",
+          "const": true
+        },
+        "conv_key": {
+          "description": "Continuity key (64 hex) of the served conversation, or null if unknown.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model_id": {
+          "description": "Local model id that actually served the job.",
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt_tokens": {
+          "description": "Prompt tokens consumed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_tokens": {
+          "description": "Response tokens generated.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_tokens": {
+          "description": "Prompt tokens served from the KV cache, or null if not measurable.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "idle_ms_hint": {
+          "description": "How long the member's KV for this conversation is likely to stay warm, in ms; drives the skip-line (D-E2). null if unknown.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "t_queued_ms": {
+          "description": "Time from intake to dispatch start, in ms.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "t_service_ms": {
+          "description": "Service time (first token to end), in ms.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "stop_reason": {
+          "description": "The engine's stop reason, e.g. \"eos\", \"length\", \"stop\". null if not available.",
+          "type": ["string", "null"]
+        },
+        "served_by": {
+          "description": "router_id of the router that served the job.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "ok", "conv_key", "model_id", "prompt_tokens", "response_tokens", "cached_tokens", "idle_ms_hint", "t_queued_ms", "t_service_ms", "stop_reason", "served_by"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

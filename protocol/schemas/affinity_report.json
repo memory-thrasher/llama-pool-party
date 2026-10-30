@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: affinity_report (router -> coordinator)",
+  "description": "Optional batch of cache-liveness hints: which conversations this router's KV cache is still warm for, and for how long. Used by the coordinator to prefer warm members for continuations (D-E2). At most 16 entries per report; routers MAY send these at any cadence.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"affinity_report\".",
+      "type": "string",
+      "const": "affinity_report"
+    },
+    "payload": {
+      "description": "Affinity report payload.",
+      "type": "object",
+      "properties": {
+        "router_id": {
+          "description": "Router_id of the sending router (as in handshake).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "entries": {
+          "description": "Cache-liveness hints. At most 16 per report.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "description": "One conversation's cache-liveness hint.",
+            "type": "object",
+            "properties": {
+              "conv_key": {
+                "description": "Continuity key (64 hex) of the conversation.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "idle_ms": {
+                "description": "Milliseconds since this conversation was last served on this router.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "cached_tokens": {
+                "description": "Prompt tokens currently cached for this conversation, or null if not measurable.",
+                "type": ["integer", "null"],
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": ["conv_key", "idle_ms", "cached_tokens"]
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": ["router_id", "entries"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

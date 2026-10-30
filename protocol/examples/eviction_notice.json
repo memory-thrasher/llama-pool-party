@@ -1,0 +1,12 @@
+{
+  "type": "eviction_notice",
+  "payload": {
+    "router_id": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c",
+    "model_id": "llama3.2-3b-instruct-q8_0",
+    "evicted_jobs": [
+      "00000000-0000-4000-8000-000000000006",
+      "00000000-0000-4000-8000-000000000007"
+    ],
+    "reason": "owner_unload"
+  }
+}

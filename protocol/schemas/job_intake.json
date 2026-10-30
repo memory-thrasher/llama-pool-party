@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 job intake metadata (POST /pool/jobs)",
+  "description": "Metadata body of POST /pool/jobs, sent by the originating router to enqueue a client job for pool dispatch. The raw client body is NOT in this message: it is sent separately via PUT /pool/jobs/{job_id}/body (see catalog.md, \"Job intake\"). Anti-memory: metadata only, no prompt/response content (D-I1).",
+  "type": "object",
+  "properties": {
+    "tag": {
+      "description": "Pool class/tag the client requested, e.g. \"pool-text-lg\".",
+      "type": "string",
+      "minLength": 1
+    },
+    "est_prompt_tokens": {
+      "description": "Estimated prompt size in tokens (computed by the router before queuing; the coordinator never derives it from body content).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "est_ctx_needed": {
+      "description": "Context length the request is expected to need (prompt + expected response).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "priority": {
+      "description": "live = interactive request; batch = async batch item (always lower priority than live, D-F4).",
+      "type": "string",
+      "enum": ["live", "batch"]
+    },
+    "conv_key": {
+      "description": "Continuity key if known: SHA-256 (64 hex) of the first 8 KiB of the raw client payload (D-E1). null for new conversations and batch items.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "client_hint": {
+      "description": "Optional client/harness identifier for records, e.g. \"pi\". Metadata only, capped at 64 chars.",
+      "type": ["string", "null"],
+      "maxLength": 64
+    }
+  },
+  "additionalProperties": false,
+  "required": ["tag", "est_prompt_tokens", "est_ctx_needed", "priority", "conv_key", "client_hint"]
+}

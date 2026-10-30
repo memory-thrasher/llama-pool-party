@@ -1,0 +1,17 @@
+{
+  "type": "completion",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000004",
+    "ok": true,
+    "conv_key": null,
+    "model_id": "llama3.2-3b-instruct-q8_0",
+    "prompt_tokens": 96,
+    "response_tokens": 512,
+    "cached_tokens": null,
+    "idle_ms_hint": null,
+    "t_queued_ms": 12,
+    "t_service_ms": 4100,
+    "stop_reason": "length",
+    "served_by": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c"
+  }
+}

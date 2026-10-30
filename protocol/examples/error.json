@@ -1,0 +1,15 @@
+{
+  "type": "error",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000003",
+    "ok": false,
+    "stage": "pre_token",
+    "code": "model_gone",
+    "message": "model_gone at dispatch",
+    "prompt_tokens": null,
+    "response_tokens": null,
+    "conv_key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "t_queued_ms": 95,
+    "t_service_ms": null
+  }
+}

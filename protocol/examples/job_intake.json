@@ -1,0 +1,8 @@
+{
+  "tag": "pool-text-lg",
+  "est_prompt_tokens": 1200,
+  "est_ctx_needed": 4096,
+  "priority": "live",
+  "conv_key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "client_hint": "pi"
+}

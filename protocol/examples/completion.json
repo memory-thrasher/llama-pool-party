@@ -1,0 +1,17 @@
+{
+  "type": "completion",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000001",
+    "ok": true,
+    "conv_key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "model_id": "qwen3-14b-q4_k_m",
+    "prompt_tokens": 1210,
+    "response_tokens": 342,
+    "cached_tokens": 1188,
+    "idle_ms_hint": 4200,
+    "t_queued_ms": 180,
+    "t_service_ms": 7350,
+    "stop_reason": "eos",
+    "served_by": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c"
+  }
+}

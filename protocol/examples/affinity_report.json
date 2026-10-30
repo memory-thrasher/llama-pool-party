@@ -1,0 +1,18 @@
+{
+  "type": "affinity_report",
+  "payload": {
+    "router_id": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c",
+    "entries": [
+      {
+        "conv_key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "idle_ms": 3200,
+        "cached_tokens": 1188
+      },
+      {
+        "conv_key": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "idle_ms": 51000,
+        "cached_tokens": null
+      }
+    ]
+  }
+}

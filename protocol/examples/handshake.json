@@ -1,0 +1,31 @@
+{
+  "type": "handshake",
+  "payload": {
+    "proto": 1,
+    "router_id": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c",
+    "router_name": "alice-desktop",
+    "software": "llama.cpp b11827-pool",
+    "models": [
+      {
+        "model_id": "qwen3-14b-q4_k_m",
+        "tags": ["pool-text-lg"],
+        "n_ctx": 32768,
+        "n_embd": 5120,
+        "n_slots": 1,
+        "busy_slots": 0,
+        "status": "loaded",
+        "vram_mb": 9216
+      },
+      {
+        "model_id": "llama3.2-3b-instruct-q8_0",
+        "tags": ["pool-text-sm"],
+        "n_ctx": 8192,
+        "n_embd": 3072,
+        "n_slots": 2,
+        "busy_slots": 0,
+        "status": "excluded",
+        "vram_mb": null
+      }
+    ]
+  }
+}

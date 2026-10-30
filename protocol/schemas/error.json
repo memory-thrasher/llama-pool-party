@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: error (router -> coordinator)",
+  "description": "A dispatched job failed. stage=pre_token enables hop-on-error (automatic re-dispatch within the same class, D-G1); stage=mid_stream is a clean, client-visible, structured error (D-G2). Anti-memory: message is capped at 200 chars and must never include prompt/response content (D-I1).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"error\".",
+      "type": "string",
+      "const": "error"
+    },
+    "payload": {
+      "description": "Error payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Job id that failed.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "ok": {
+          "description": "Always false in an error.",
+          "type": "boolean",
+          "const": false
+        },
+        "stage": {
+          "description": "pre_token = failed before the first response token (hop eligible, D-G1); mid_stream = failed after the first token (D-G2).",
+          "type": "string",
+          "enum": ["pre_token", "mid_stream"]
+        },
+        "code": {
+          "description": "model_gone: serving model vanished; overflow: context overflow (carries the canonical \"exceeds the available context size\" wording, D-C5); crash: engine crashed; timeout: deadline exceeded; client_disconnected: client gave up (D-G4); other: anything else.",
+          "type": "string",
+          "enum": ["model_gone", "overflow", "crash", "timeout", "client_disconnected", "other"]
+        },
+        "message": {
+          "description": "Short, non-sensitive reason. Must NEVER include prompt/response content (anti-memory, D-I1); capped at 200 chars.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "prompt_tokens": {
+          "description": "Prompt tokens consumed before the failure, or null if unknown.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "response_tokens": {
+          "description": "Partial response tokens generated before the failure, if any; null otherwise.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "conv_key": {
+          "description": "Continuity key (64 hex) of the affected conversation, or null if unknown.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "t_queued_ms": {
+          "description": "Time from intake to dispatch start, in ms; null if unknown.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "t_service_ms": {
+          "description": "Time from dispatch start to failure, in ms; null if unknown.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "ok", "stage", "code", "message", "prompt_tokens", "response_tokens", "conv_key", "t_queued_ms", "t_service_ms"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

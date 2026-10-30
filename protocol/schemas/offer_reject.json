@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 message: offer_reject (router -> coordinator)",
+  "description": "Phase 1 of two-phase dispatch (D-D2): the router declines the offered job. The coordinator moves the offer to the next candidate WITHOUT transferring the body. A race (e.g. no_slot) is normal and not an error (D-D3).",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "Must be \"offer_reject\".",
+      "type": "string",
+      "const": "offer_reject"
+    },
+    "payload": {
+      "description": "Offer reject payload.",
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "description": "Job id from the work_offer being rejected.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "description": "model_gone: model no longer loaded on this router; ctx_insufficient: real context below est_ctx_needed; no_slot: no free slot; busy: router intentionally busy; evicted: model was evicted between offer and decision; other: anything else.",
+          "type": "string",
+          "enum": ["model_gone", "ctx_insufficient", "no_slot", "busy", "evicted", "other"]
+        },
+        "detail": {
+          "description": "Optional short, non-sensitive reason text. Must NEVER include prompt/response content (anti-memory, D-I1); capped at 200 chars.",
+          "type": ["string", "null"],
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false,
+      "required": ["job_id", "reason", "detail"]
+    }
+  },
+  "additionalProperties": false,
+  "required": ["type", "payload"]
+}

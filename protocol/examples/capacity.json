@@ -1,0 +1,29 @@
+{
+  "type": "capacity",
+  "payload": {
+    "router_id": "6f9b1c2e-4d8a-4e6f-9c3b-2a1d0e9f8b7c",
+    "models": [
+      {
+        "model_id": "qwen3-14b-q4_k_m",
+        "tags": ["pool-text-lg"],
+        "n_ctx": 32768,
+        "n_embd": 5120,
+        "n_slots": 1,
+        "busy_slots": 1,
+        "status": "loaded",
+        "vram_mb": 9216
+      },
+      {
+        "model_id": "llama3.2-3b-instruct-q8_0",
+        "tags": ["pool-text-sm"],
+        "n_ctx": 8192,
+        "n_embd": 3072,
+        "n_slots": 2,
+        "busy_slots": 0,
+        "status": "excluded",
+        "vram_mb": null
+      }
+    ],
+    "updated_at": "2026-10-30T07:00:00Z"
+  }
+}
