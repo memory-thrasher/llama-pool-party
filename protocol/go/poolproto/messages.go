@@ -189,6 +189,7 @@ type EvictionNotice struct {
 // JobIntake is the metadata body of POST /pool/jobs (catalog §4). The raw
 // client body travels separately via PUT /pool/jobs/{job_id}/body.
 type JobIntake struct {
+	RequestID       string  `json:"request_id"` // router-generated idempotency key (D-G5)
 	Tag             string  `json:"tag"`
 	EstPromptTokens int     `json:"est_prompt_tokens"`
 	EstCtxNeeded    int     `json:"est_ctx_needed"`
