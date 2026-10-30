@@ -47,7 +47,12 @@ TYPES = [
     "eviction_notice",
 ]
 # Endpoints the catalog must name (besides the 11 types).
-ENDPOINTS = ["/pool/jobs", "/pool/jobs/{job_id}/body", "/pool/classes"]
+ENDPOINTS = [
+    "/pool/jobs",
+    "/pool/jobs/{job_id}/body",
+    "/pool/jobs/{job_id}/response",
+    "/pool/classes",
+]
 # Transport endpoints the catalog must also document.
 TRANSPORT = ["/pool/events", "/pool/subscribe"]
 

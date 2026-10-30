@@ -398,6 +398,44 @@ Router-side use:
 
 Example: `examples/class_advertisement.json`.
 
+## 6b. Response relay (live jobs)
+
+Member networking is outbound-only (D-A2): the serving router (B) cannot be
+reached from the originating router (A), and A owns the client socket (D-H2).
+So the response travels **B -> coordinator -> A**, and the coordinator is a
+pure in-memory relay of response bytes (it never parses or stores them, D-I4
+extended). The client's stream shape is untouched: whatever NDJSON lines
+(llama.cpp OAI-compat chat stream) the serving child produces are the lines
+A writes to the client.
+
+Sequence (live jobs only; async batch items never use this):
+
+1. A: `POST /pool/jobs` -> `201 {job_id}`; `PUT /pool/jobs/{job_id}/body` -> `200`.
+2. A: `GET /pool/jobs/{job_id}/response` - **held open** by the coordinator.
+   While the job is queued/offered the coordinator writes SSE-style heartbeat
+   comments (`: hb <unix_ms>`, ~25 s). Once B's response starts, the
+   coordinator streams the NDJSON lines to A verbatim, one SSE `data:` line
+   per response line (the stream is line-oriented on both ends). The
+   connection closes when the response ends (terminal). Request headers:
+   `Authorization: Bearer <member_token>`, `X-Pool-Proto: 1`. A may close it
+   at any time (client gave up, D-G4); the coordinator then aborts B's push
+   (B sees its `PUT` stream close and stops the local generation).
+3. B: on `work_offer` + `offer_accept`, B pulls the body (`GET .../body`),
+   serves locally, and pushes the response:
+   `PUT /pool/jobs/{job_id}/response` with the NDJSON stream
+   (`Content-Type: application/x-ndjson`). B may close the stream early on a
+   serving failure (D-G2: post-first-token failure is a clean, structured,
+   client-visible error; A has already seen the first tokens or not - A maps
+   stream closure without a terminal `[DONE]` line to the structured error).
+4. B's `completion`/`error` event (R->C, sections 3.7/3.8) is **mirrored** by
+   the coordinator onto A's `GET /pool/subscribe` stream as ordinary
+   `data:` envelopes (same shape, no new types) so A can log and clean up its
+   client job. A does not need it to complete the client response - the
+   response stream itself is terminal.
+
+The relay holds response bytes in memory only (bounded by the stream); it is
+never written to disk and never logged (anti-memory, section 7).
+
 ## 7. Anti-memory rule (normative)
 
 No message may carry prompt or response content. Concretely:

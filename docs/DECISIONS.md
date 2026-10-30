@@ -46,6 +46,7 @@ ID convention: stable decision IDs (D-*) so they can be referenced in review and
 - **D-D3** The coordinator checks availability (membership + free slot) with the router over the established connection before sending work; on a race (router says "no slot") it moves on.
 - **D-D4** Large prompts get preference for members with the most context headroom within the same class.
 - **D-D5** Per-user **priority lists** within a class (their own models, or the admin-curated shared list) are honored when multiple GPUs are immediately available.
+- **D-D6** **Response relay (live jobs).** The serving router (B) cannot be reached from the originating router (A) - both are outbound-only - so the response travels **B -> coordinator -> A**: A opens a held-open `GET /pool/jobs/{job_id}/response` right after its body PUT; B pushes the NDJSON response stream via `PUT /pool/jobs/{job_id}/response` once it starts serving; the coordinator relays the bytes in memory only (store-and-forward, never parsed/stored, D-I4 extended). A closes = client gave up (D-G4) = coordinator aborts B's push. B's `completion`/`error` envelopes are mirrored onto A's subscribe stream (existing types, no new message types). The client stream shape is exactly the serving child's NDJSON - unchanged. Chosen over multiplexing response bytes onto the subscribe channel: cleaner channel separation, works identically in SSE and long-poll modes, and the subscribe loop stays control-only.
 
 ## E. Continuity (cache affinity)
 
@@ -101,7 +102,7 @@ ID convention: stable decision IDs (D-*) so they can be referenced in review and
 
 - **D-K1** **Plain HTTPS, no websockets.** The router issues `GET /pool/subscribe`; the coordinator **holds the response open** and writes events (SSE `data:` lines, ~25 s heartbeat comments; fallback: long-poll with ~25 s keepalive + re-issue).
 - **D-K2** Router -> coordinator: results, errors, capacity changes, continuity reports, exclusion marks flow back as small **POST events** the moment they happen (the router owns the client socket, so disconnects are known instantly - no polling).
-- **D-K3** Implemented with **curl** (already a llama.cpp dependency); cpp-httplib is server-only. No new transport dependency.
+- **D-K3** Implemented with the **vendored cpp-httplib in client mode** (`httplib::Client`), which `llama-server` already links (OpenSSL-enabled). No new transport dependency. (Supersedes the earlier "use curl" note: at `b11827` curl is not a llama.cpp dependency - `LLAMA_CURL` is a deprecated option - so adding libcurl would be new install friction on every member machine for no benefit. The cpp-httplib client supports streaming response callbacks, which the SSE subscribe needs.)
 - **D-K4** Push, not polling: work offers arrive as events on the open GET. Steady state: a few KB/min per router.
 
 ## L. Harness compatibility
@@ -139,7 +140,7 @@ Re-verify before implementation; palace entries 1793172830304 and 1793225681364 
 - **V4** pi listing gate in `provider.js` `modelIsSelectable` -> drives D-C2/D-L4.
 - **V5** Router internals: `server_models` maps model name -> one child subprocess; strict name routing, no load-balancing between instances; `ensure_model_ready` blocks the HTTP thread; preset change on a running model **unloads** it (does not respawn); `/slots`, `/props`, `/metrics`, `/tokenize` exist and are proxied in router mode; model `tags` exist (informational today); single `--api-key`, no per-user identity.
 - **V6** No `/v1/batches` anywhere in upstream (grep-verified) -> the batch endpoint is genuinely new.
-- **V7** cpp-httplib is server-only (no WS client); curl is an existing dependency -> D-K1/D-K3.
+- **V7** At `b11827` the router has no outbound HTTP client; cpp-httplib (vendored, already linked into `llama-server` with OpenSSL) is the only HTTP library present - its `httplib::Client` is used for the pool links (client mode), and curl is NOT a dependency (`LLAMA_CURL` is a deprecated option) -> D-K1/D-K3.
 - **V8** The user-observed "compaction fired erroneously when the model was unavailable" is explained by V1(b): after unload+reload, real usage desyncs from pi's *cached* contextWindow -> false positive. Hence D-C3/D-C4 (advertise high, never below reality).
 
 ## Q. Open items
@@ -159,3 +160,5 @@ Implementation plan: **P01 protocol message catalog + JSON schemas first**, then
 - 2026-10-28 - workspace set up: fork worktree `llama.cpp-pool/` (branch `pool/main` cut from tag `b11827`), coordinator dir `pool-coordinator/` with docs under `docs/`; service working name renamed `pool-controller` -> `pool-coordinator`.
 - 2026-10-28 - design converged after three feedback rounds; this record created. All D-* current as written.
 - 2026-10-30 - D-C8 added: advertisement delivery is pull (`GET /pool/classes`, 2 s router cache, local-only fallback). Caught during wave-1 planning: the banked protocol (11 envelope types) had no channel for cross-member advertisement state, and clients query the router, not the coordinator. Additive REST endpoint; envelope catalog unchanged. Protocol contract updated (schema + example + catalog §6).
+- 2026-10-30 - D-K3/V7 corrected: at `b11827` curl is not a llama.cpp dependency (`LLAMA_CURL` is a deprecated option); the router's outbound pool links use the vendored cpp-httplib in client mode (already linked, OpenSSL-enabled after the WS-00 build fix). No new dependencies added to the fork.
+- 2026-10-30 - D-D6 added: live response relay B -> coordinator (in-memory) -> A via `GET/PUT /pool/jobs/{job_id}/response`; completion/error mirrored to A's subscribe. Caught during wave-1 planning: the banked contract defined intake + body pull but no response path, while the docs state "the response streams back through your router". No new envelope types; two endpoints + relay semantics documented in the catalog (6b). Schema amendment planned for WS-06 (queue_jobs gains request_id, originating_router_id, serving_router_id).
