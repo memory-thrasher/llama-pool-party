@@ -7,7 +7,13 @@ import (
 
 func setEnv(t *testing.T) {
 	t.Helper()
-	// Save and restore so tests don't leak state between cases.
+	// Clear all four COORD_* vars at the START of each test so results are hermetic
+	// even when the environment already defines them (t.Setenv restores the
+	// original value on cleanup).
+	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL"} {
+		t.Setenv(k, "")
+	}
+	// Backstop: leave nothing behind even if a future change skips the loop above.
 	t.Cleanup(func() {
 		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL"} {
 			t.Setenv(k, "")

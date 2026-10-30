@@ -1,15 +1,19 @@
-// Package schema applies the coordinator's postgres schema (schema/0001_init.sql)
-// idempotently.
+// Package schema applies the coordinator's postgres schema (v1) idempotently.
 //
 // The coordinator is stdlib-only by design (no external Go Postgres driver), so
 // Apply shells out to the psql(1) client. The DSN is a libpq-style
 // keyword/value conninfo string, passed to psql as the database argument:
 //
 //	Apply(ctx, "user=sid dbname=pool_dev_scratch")
+//
+// The schema v1 script lives in this package and is embedded at build time
+// (go:embed cannot reach outside the package), so Apply reads no file at
+// runtime and no build-host path is baked into the binary.
 package schema
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,21 +22,13 @@ import (
 	"strings"
 )
 
-// schemaSQLPath returns the repo-root location of the schema v1 script, resolved
-// relative to this source file (embed cannot reach outside the package).
-func schemaSQLPath() (string, error) {
-	_, thisFile, ok := sourceFile()
-	if !ok {
-		return "", fmt.Errorf("schema: unable to locate source file")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "../../schema/0001_init.sql"), nil
-}
+// schemaSQL is the schema v1 script, embedded at build time.
+//
+//go:embed 0001_init.sql
+var schemaSQL []byte
 
 // psqlPath returns the psql binary, overridable for tests.
 var psqlPath = "psql"
-
-// osReadFile is os.ReadFile, kept as a variable for testability.
-var osReadFile = os.ReadFile
 
 // sourceFile returns the absolute path of the file containing this call's
 // package, used to locate sibling SQL scripts without build tags.
@@ -51,24 +47,16 @@ func repoRootDir() (string, error) {
 	return filepath.Join(filepath.Dir(thisFile), "../.."), nil
 }
 
-// Apply runs schema v1 against the database named by dsn, idempotently.
-// The script is schema/0001_init.sql (idempotent by construction: every
-// statement is CREATE ... IF NOT EXISTS / INSERT ... ON CONFLICT DO NOTHING).
+// Apply runs the embedded schema v1 against the database named by dsn,
+// idempotently. Every statement is CREATE ... IF NOT EXISTS /
+// INSERT ... ON CONFLICT DO NOTHING.
 func Apply(ctx context.Context, dsn string) error {
-	path, err := schemaSQLPath()
-	if err != nil {
-		return err
-	}
-	b, err := osReadFile(path)
-	if err != nil {
-		return fmt.Errorf("schema: read %s: %w", path, err)
-	}
-	return ApplySQL(ctx, dsn, string(b))
+	return ApplySQL(ctx, dsn, string(schemaSQL))
 }
 
 // ApplyFile runs the SQL script at path against the database named by dsn.
 func ApplyFile(ctx context.Context, dsn, path string) error {
-	b, err := osReadFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("schema: read %s: %w", path, err)
 	}

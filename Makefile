@@ -11,8 +11,16 @@
 PGDSN    ?= user=sid dbname=postgres
 SCRATCH  ?= pool_dev_scratch
 
-# conninfo for the scratch database, derived from PGDSN (same user/host, db swapped).
-PGDSN_SCRATCH := $(shell echo "$(PGDSN)" | sed 's/dbname=[^ ]*/dbname=$(SCRATCH)/')
+# conninfo for the scratch database, derived from PGDSN: an existing dbname= token
+# is replaced, otherwise dbname=pool_dev_scratch is appended. Fails loudly at
+# parse time if the derivation did not land.
+PGDSN_SCRATCH := $(shell echo "$(PGDSN)" | sed 's/dbname=[^ ]*/dbname=$(SCRATCH)/; t; s/$$/ dbname=$(SCRATCH)/')
+
+# Does the derived DSN actually name the scratch database?
+PGDSN_SCRATCH_OK := $(findstring dbname=$(SCRATCH),$(PGDSN_SCRATCH))
+ifeq ($(PGDSN_SCRATCH_OK),)
+$(error derived PGDSN_SCRATCH '$(PGDSN_SCRATCH)' lacks 'dbname=$(SCRATCH)'; cannot derive scratch conninfo from PGDSN '$(PGDSN)')
+endif
 
 PSQL := psql
 GO   ?= go
@@ -31,12 +39,14 @@ vet:
 test:
 	PGDSN="$(PGDSN)" $(GO) test ./...
 
-# Apply schema/0001_init.sql to $(SCRATCH), creating it if missing.
+# Apply internal/schema/0001_init.sql (embedded into the coordinator binary
+# via go:embed) to $(SCRATCH), creating it if missing.
 # Idempotent: safe to run repeatedly.
 schema-apply:
 	@echo "PGDSN=$(PGDSN)"
+	@echo "PGDSN_SCRATCH=$(PGDSN_SCRATCH)"
 	$(PSQL) -v ON_ERROR_STOP=1 -q -X -d "$(PGDSN)" -c "select datname from pg_database where datname = '$(SCRATCH)'" | grep -q "$(SCRATCH)" || $(PSQL) -v ON_ERROR_STOP=1 -q -X -d "$(PGDSN)" -c "create database $(SCRATCH)"
-	$(PSQL) -v ON_ERROR_STOP=1 -q -X -d "$(PGDSN_SCRATCH)" -c "$$(cat schema/0001_init.sql)"
+	$(PSQL) -v ON_ERROR_STOP=1 -q -X -d "$(PGDSN_SCRATCH)" -c "$$(cat internal/schema/0001_init.sql)"
 
 # Run sql/bootstrap_admin.sql against $(SCRATCH). Idempotent: safe to run twice.
 bootstrap:

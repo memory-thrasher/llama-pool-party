@@ -40,7 +40,10 @@ func targetDSN(t *testing.T) string {
 	return dsn
 }
 
-// ensureScratchDB creates pool_dev_scratch (in targetDB's cluster) if it is missing.
+// ensureScratchDB creates pool_dev_scratch (in targetDB's cluster) if it is
+// missing, and returns the conninfo for it. The scratch DSN is derived from
+// pgDSN: an existing dbname= token is replaced, otherwise dbname=pool_dev_scratch
+// is appended. It never silently no-ops onto the wrong database.
 func ensureScratchDB(ctx context.Context, pgDSN string) (scratchDSN string, err error) {
 	rows, err := psqlQuery(ctx, pgDSN, "select datname from pg_database where datname = 'pool_dev_scratch'")
 	if err != nil {
@@ -51,15 +54,32 @@ func ensureScratchDB(ctx context.Context, pgDSN string) (scratchDSN string, err 
 			return "", fmt.Errorf("create pool_dev_scratch: %w", err)
 		}
 	}
-	scratchDSN = strings.ReplaceAll(pgDSN, "dbname=postgres", "dbname=pool_dev_scratch")
-	return scratchDSN, nil
+	return scratchDSNFromConninfo(pgDSN, "pool_dev_scratch"), nil
+}
+
+// scratchDSNFromConninfo derives the conninfo for database db from a libpq-style
+// conninfo string: replace an existing dbname=<value> token, or append
+// dbname=<db> at the end when none is present.
+func scratchDSNFromConninfo(pgDSN, db string) string {
+	words := strings.Fields(pgDSN)
+	for i, w := range words {
+		if strings.HasPrefix(w, "dbname=") {
+			words[i] = "dbname=" + db
+			return strings.Join(words, " ")
+		}
+	}
+	return pgDSN + " dbname=" + db
 }
 
 // TestApplyTwiceScratchDB applies schema v1 and the bootstrap script to the
-// scratch DB pool_dev_scratch twice each, proving idempotency end to end.
-// Skips cleanly when postgres is unreachable.
+// scratch DB pool_dev_scratch twice each, proving idempotency end to end:
+// re-running never duplicates or re-seeds anything. Skips cleanly when
+// postgres is unreachable.
 func TestApplyTwiceScratchDB(t *testing.T) {
 	pgDSN := targetDSN(t)
+	if !strings.Contains(pgDSN, "dbname=postgres") {
+		t.Fatalf("PGDSN must name dbname=postgres (got %q); refusing to touch a non-default database", pgDSN)
+	}
 	if err := psqlConn(pgDSN); err != nil {
 		t.Skipf("postgres unreachable via PGDSN=%q: %v", pgDSN, err)
 	}
@@ -102,6 +122,22 @@ func TestApplyTwiceScratchDB(t *testing.T) {
 		t.Fatalf("admin rows = %v, want exactly one row 'admin,admin'", rows)
 	}
 	t.Logf("admin rows: %v (want exactly 1)", rows)
+
+	// 4. no soft-duplication: the seeds stay singleton across apply+bootstrap x2
+	//    (the idempotency claim the test advertises).
+	checkCount := func(query, want string) {
+		t.Helper()
+		rows, err := psqlQuery(ctx, scratchDSN, query)
+		if err != nil {
+			t.Fatalf("count for %q: %v", query, err)
+		}
+		if len(rows) != 1 || rows[0] != want {
+			t.Fatalf("count for %q = %v, want %q", query, rows, want)
+		}
+	}
+	checkCount("select count(*) from classes", "6")
+	checkCount("select count(*) from user_tokens", "1")
+	checkCount("select count(*) from users where email = 'admin'", "1")
 }
 
 // bootstrapSQLPath locates sql/bootstrap_admin.sql relative to this source file.

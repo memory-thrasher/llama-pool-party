@@ -41,7 +41,11 @@ create table if not exists user_tokens (
     revoked_at   timestamptz
 );
 comment on table user_tokens is 'Opaque 256-bit user tokens; only the sha256 hash is stored (D-J2).';
-create unique index if not exists user_tokens_user_name_uq on user_tokens (user_id, name) where revoked_at is null;
+-- Plain unique index per spec (D-J2): UNIQUE (user_id, name). The partial form
+-- (where revoked_at is null) is NOT spec-conforming: spec-conforming
+-- `on conflict (user_id, name)` upserts fail against a partial index, and a user
+-- can accumulate multiple revoked 'default' rows.
+create unique index if not exists user_tokens_user_name_uq on user_tokens (user_id, name);
 
 create table if not exists routers (
     id          uuid primary key,            -- router_id from the handshake

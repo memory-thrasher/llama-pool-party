@@ -9,11 +9,12 @@ coordinator workstream; the protocol contract lives in `protocol/` (WS-01).
 - `cmd/coordinator` - service entrypoint; loads config, prints a startup banner.
 - `internal/config` - env-based configuration (`COORD_ADDR`, `COORD_DSN`,
   `COORD_STATIC_DIR`, `COORD_LOG_LEVEL`) with unit tests.
-- `internal/schema` - idempotent application of the schema (`Apply`), with an
-  integration test that applies it to a scratch database twice.
-- `schema/0001_init.sql` - schema v1: users, tokens, routers, models, classes,
-  queue, records, continuity, exclusions. Plain `CREATE ... IF NOT EXISTS` /
-  `ON CONFLICT DO NOTHING` throughout.
+- `internal/schema` - idempotent application of the schema v1 (`Apply`),
+  with the SQL embedded via `go:embed`; an integration test applies it to a
+  scratch database twice.
+- `internal/schema/0001_init.sql` - schema v1: users, tokens, routers,
+  models, classes, queue, records, continuity, exclusions. Plain
+  `CREATE ... IF NOT EXISTS` / `ON CONFLICT DO NOTHING` throughout.
 - `sql/bootstrap_admin.sql` - idempotent bootstrap of the `admin` user (D-J4).
 
 ## Build & test
