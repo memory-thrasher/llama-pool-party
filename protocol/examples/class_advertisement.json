@@ -1,0 +1,19 @@
+{
+  "protocol": 1,
+  "classes": [
+    {
+      "tag": "pool-text-md",
+      "member_count": 2,
+      "advertised_ctx": 131072,
+      "min_ctx": 32768,
+      "max_ctx": 193280
+    },
+    {
+      "tag": "pool-text-lg",
+      "member_count": 1,
+      "advertised_ctx": 208128,
+      "min_ctx": 208128,
+      "max_ctx": 208128
+    }
+  ]
+}

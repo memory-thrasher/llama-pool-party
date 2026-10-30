@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pool protocol v1 class advertisement state (GET /pool/classes response)",
+  "description": "Response body of GET /pool/classes: the coordinator's computed cross-member class advertisement state (D-C1, D-C3). Metadata only, no prompt/response content (anti-memory).",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "description": "Protocol version.",
+      "type": "integer",
+      "const": 1
+    },
+    "classes": {
+      "description": "One entry per class with at least one loaded member (D-C1). A class with no loaded member is absent from the list, not listed with a zero count.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "tag": {
+            "description": "Pool class tag, e.g. \"pool-text-lg\".",
+            "type": "string",
+            "minLength": 1
+          },
+          "member_count": {
+            "description": "Loaded members across all connected routers (D-C1). Exclusion marks do not reduce this count (D-F1 is a per-user dispatch preference, not membership).",
+            "type": "integer",
+            "minimum": 1
+          },
+          "advertised_ctx": {
+            "description": "The context the router advertises for this class: min(average + std_dev, max) across loaded members (D-C3); a coordinator config option selects max instead.",
+            "type": "integer",
+            "minimum": 1
+          },
+          "min_ctx": {
+            "description": "Smallest member context in the class.",
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_ctx": {
+            "description": "Largest member context in the class.",
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false,
+        "required": ["tag", "member_count", "advertised_ctx", "min_ctx", "max_ctx"]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": ["protocol", "classes"]
+}

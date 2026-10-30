@@ -37,6 +37,7 @@ ID convention: stable decision IDs (D-*) so they can be referenced in review and
 - **D-C5** Invariant 2: **every** overflow rejection (local router, coordinator pre-check, serving worker) carries the substring `exceeds the available context size` - the string llama.cpp already emits natively and pi already matches (`/exceeds the available context size/i`). One constant, three emitters.
 - **D-C6** Invariant 3: the router **clamps `max_tokens` to the selected member's capacity at dispatch** (pi sets `max_tokens` = advertised window; without the clamp, high advertisement gets rejected for the wrong reason).
 - **D-C7** Class membership is checked **twice**: at request receipt (pre-queue) and at dispatch (post-queue). Canonical no-membership error: `"model is not loaded"` (safe: matches no pi overflow/retry pattern).
+- **D-C8** **Advertisement delivery is pull, not push.** The cross-member advertisement state (D-C1/D-C3) reaches the client-facing router via `GET /pool/classes` (response shape in the protocol contract), cached 2 s (config-overridable). On pull failure or with no coordinator configured the router degrades to **local-only advertisement** (its own loaded members, their own context values). Chosen over a C→R envelope event: the state is small, changes only on membership events, and pull keeps the banked envelope catalog (11 closed types) unchanged.
 
 ## D. Dispatch
 
@@ -157,3 +158,4 @@ Implementation plan: **P01 protocol message catalog + JSON schemas first**, then
 
 - 2026-10-28 - workspace set up: fork worktree `llama.cpp-pool/` (branch `pool/main` cut from tag `b11827`), coordinator dir `pool-coordinator/` with docs under `docs/`; service working name renamed `pool-controller` -> `pool-coordinator`.
 - 2026-10-28 - design converged after three feedback rounds; this record created. All D-* current as written.
+- 2026-10-30 - D-C8 added: advertisement delivery is pull (`GET /pool/classes`, 2 s router cache, local-only fallback). Caught during wave-1 planning: the banked protocol (11 envelope types) had no channel for cross-member advertisement state, and clients query the router, not the coordinator. Additive REST endpoint; envelope catalog unchanged. Protocol contract updated (schema + example + catalog §6).

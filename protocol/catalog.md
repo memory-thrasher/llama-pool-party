@@ -178,7 +178,7 @@ The router declines. The coordinator moves the offer to the next candidate
 |---|---|---|
 | `job_id` | UUID | the offered job |
 | `reason` | enum | `model_gone`, `ctx_insufficient`, `no_slot`, `busy`, `evicted`, `other` |
-| `detail` | string ≤200 \| null | optional; never prompt/response content (anti-memory §6) |
+| `detail` | string ≤200 \| null | optional; never prompt/response content (anti-memory §7) |
 
 Examples: `examples/offer_reject.json`, `examples/offer_reject_model_gone.json`.
 
@@ -230,7 +230,7 @@ clean, structured, client-visible error; the harness retries the turn (D-G2).
 | `ok` | bool | const `false` |
 | `stage` | enum | `pre_token` (hop eligible) / `mid_stream` |
 | `code` | enum | `model_gone`, `overflow`, `crash`, `timeout`, `client_disconnected`, `other` |
-| `message` | string 1..200 | short reason; never prompt/response content (§6). `overflow` carries the canonical `exceeds the available context size` wording (D-C5) |
+| `message` | string 1..200 | short reason; never prompt/response content (§7). `overflow` carries the canonical `exceeds the available context size` wording (D-C5) |
 | `prompt_tokens` | int \| null | consumed before failure, if known |
 | `response_tokens` | int \| null | partial, if any |
 | `conv_key` | 64-hex \| null | |
@@ -357,7 +357,48 @@ store-and-forward here; it never parses or alters the body (D-I4).
 
 ---
 
-## 6. Anti-memory rule (normative)
+## 6. Class advertisement (GET /pool/classes)
+
+Cross-member class advertisement (D-C1, D-C3) reaches the client-facing router
+by **pull**: the router fetches the coordinator's computed advertisement state
+and merges it into its model list. No envelope message carries this; the state
+is small and changes only on membership events.
+
+`GET /pool/classes`
+
+- Request headers: `Authorization: Bearer <member_token>`, `X-Pool-Proto: 1`.
+- Response: `200 OK`, body per `schemas/class_advertisement.json`.
+
+| field | type | notes |
+|---|---|---|
+| `protocol` | int | = 1 |
+| `classes` | array | one entry per class with ≥ 1 loaded member (D-C1); a class with no loaded member is **absent**, not listed with a zero count |
+
+Class entry:
+
+| field | type | notes |
+|---|---|---|
+| `tag` | string | e.g. `pool-text-lg` |
+| `member_count` | int ≥ 1 | loaded members across all connected routers; exclusion marks do not reduce this (D-F1 is a per-user dispatch preference, not membership) |
+| `advertised_ctx` | int ≥ 1 | `min(average + std_dev, max)` across loaded members (D-C3); a coordinator config option selects `max` instead |
+| `min_ctx` | int ≥ 1 | smallest member context in the class |
+| `max_ctx` | int ≥ 1 | largest member context in the class |
+
+Router-side use:
+
+- The router caches the response for 2 s (config-overridable); a warm cache
+  serves the model list without contacting the coordinator.
+- If the pull fails, or no coordinator is configured, the router degrades to
+  **local-only advertisement**: it lists only the classes its own loaded
+  members carry, using their own context values.
+- `advertised_ctx` is deliberately high (D-C3/D-C4); a member whose own context
+  is below it rejects with the canonical `exceeds the available context size`
+  wording (D-C5) - the overflow path is the pressure valve. The router
+  additionally clamps `max_tokens` at dispatch (D-C6).
+
+Example: `examples/class_advertisement.json`.
+
+## 7. Anti-memory rule (normative)
 
 No message may carry prompt or response content. Concretely:
 
@@ -375,14 +416,14 @@ enforces a 250-char string cap on example content as a sanity net.
 
 ---
 
-## 7. Reserved names
+## 8. Reserved names
 
 `batch_*` (e.g. `batch_offer`, `batch_completion`) are reserved for the async
 batch workstream — **v1.1, WS-10**. Do not use these names in protocol v1.
 
 ---
 
-## 8. Versioning policy
+## 9. Versioning policy
 
 - `X-Pool-Proto: 1` on every request (both directions); `handshake.payload.proto = 1`.
 - The coordinator may reject older protocol versions (D-J6); parallel support

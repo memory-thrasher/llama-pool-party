@@ -47,7 +47,7 @@ TYPES = [
     "eviction_notice",
 ]
 # Endpoints the catalog must name (besides the 11 types).
-ENDPOINTS = ["/pool/jobs", "/pool/jobs/{job_id}/body"]
+ENDPOINTS = ["/pool/jobs", "/pool/jobs/{job_id}/body", "/pool/classes"]
 # Transport endpoints the catalog must also document.
 TRANSPORT = ["/pool/events", "/pool/subscribe"]
 
@@ -83,8 +83,8 @@ def expected_type(stem: str) -> str | None:
     """
     if stem in TYPES:
         return stem
-    if stem == "job_intake":
-        return "job_intake"
+    if stem in ("job_intake", "class_advertisement"):
+        return stem
     prefixes = [t for t in TYPES if stem.startswith(t + "_")]
     if len(prefixes) == 1:
         return prefixes[0]
@@ -124,7 +124,7 @@ def main() -> int:
     # -- Load schemas and sanity-check that they are valid draft 2020-12. ----
     print("== schemas ==")
     schemas: dict[str, dict] = {}
-    for name in ["event", "job_intake", *TYPES]:
+    for name in ["event", "job_intake", "class_advertisement", *TYPES]:
         path = SCHEMAS / f"{name}.json"
         if not path.is_file():
             fail(f"schema {name}.json", "file missing")
@@ -164,8 +164,8 @@ def main() -> int:
             continue
 
         errors = []
-        if etype == "job_intake":
-            # Job intake metadata is a plain JSON body, not an envelope.
+        if etype in ("job_intake", "class_advertisement"):
+            # These are plain JSON bodies, not envelopes.
             if etype not in schemas:
                 fail(f"example {path.name}", "schemas/job_intake.json missing")
                 continue
@@ -196,7 +196,7 @@ def main() -> int:
         else:
             ok(f"example {path.name} validates against schemas/{etype}.json")
 
-    # -- Check 2: catalog names all 11 types + the 2 endpoints. -------------
+    # -- Check 2: catalog names all 11 types + the 3 endpoints. -------------
     print("== catalog names ==")
     catalog_text = CATALOG.read_text(encoding="utf-8")
     for name in [*TYPES, *ENDPOINTS, *TRANSPORT]:
