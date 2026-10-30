@@ -1,0 +1,14 @@
+# Binaries
+/coordinator
+/bin/
+
+# Test / build artifacts
+*.test
+*.out
+
+# Editor/OS noise
+.DS_Store
+*.swp
+
+# Local scratch state (never commit)
+*.local.sql
