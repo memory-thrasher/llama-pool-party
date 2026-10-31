@@ -160,6 +160,13 @@ func (s *Server) handlePutBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job does not belong to token's user", http.StatusForbidden)
 		return
 	}
+	if job.Status != jobStatusPending {
+		// Terminal/offered jobs must not stage bodies: the purge already ran
+		// (or the job moved on) and the file would be an unpurged orphan
+		// (review M, D-I2).
+		http.Error(w, "job no longer pending: "+job.Status, http.StatusConflict)
+		return
+	}
 
 	jobsDir := filepath.Join(s.dataDir, "jobs")
 	if err := os.MkdirAll(jobsDir, 0o755); err != nil {
@@ -175,10 +182,12 @@ func (s *Server) handlePutBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.WriteFile(partPath, body, 0o600); err != nil {
+		os.Remove(partPath)
 		http.Error(w, "write body: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := os.Rename(partPath, finalPath); err != nil {
+		os.Remove(partPath)
 		http.Error(w, "rename body: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -214,6 +223,12 @@ func (s *Server) handleGetBody(w http.ResponseWriter, r *http.Request) {
 	}
 	if job.ServingRouter != routerID {
 		http.Error(w, "this router is not serving the job", http.StatusNotFound)
+		return
+	}
+	if job.AcceptedAt == "" {
+		// Offered but not accepted: reading the body would be a cross-tenant
+		// prompt disclosure (review H2).
+		http.Error(w, "offer not accepted", http.StatusNotFound)
 		return
 	}
 
@@ -269,6 +284,12 @@ func (s *Server) handlePutResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	if job.ServingRouter != routerID {
 		http.Error(w, "this router is not serving the job", http.StatusNotFound)
+		return
+	}
+	if job.AcceptedAt == "" {
+		// Pushing a response without accepting would inject bytes into another
+		// user's client stream (review H2).
+		http.Error(w, "offer not accepted", http.StatusNotFound)
 		return
 	}
 	if job.Status != jobStatusOffered && job.Status != jobStatusRunning {
@@ -363,16 +384,25 @@ func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
 			_ = s.disp.FailClientDisconnected(jobID)
 			s.logf("relay: job %s originator gave up; failed client_disconnected", jobID)
 			return
-		case line, ok := <-pipe.lines:
-			if !ok {
-				// The push ended (pipe closed): every relayed line was
-				// drained in order already.
-				s.logf("relay: job %s stream drained for %s", jobID, short(routerID))
-				return
-			}
+		case line := <-pipe.lines:
 			fmt.Fprintf(w, "data: %s\n\n", line)
 			if flusher != nil {
 				flusher.Flush()
+			}
+		case <-pipe.closed:
+			// End of stream (push finished or job terminal): drain the lines
+			// still buffered, in order, then close.
+			for {
+				select {
+				case line := <-pipe.lines:
+					fmt.Fprintf(w, "data: %s\n\n", line)
+					if flusher != nil {
+						flusher.Flush()
+					}
+				default:
+					s.logf("relay: job %s stream drained for %s", jobID, short(routerID))
+					return
+				}
 			}
 		case <-hb.C:
 			fmt.Fprintf(w, ": hb %d\n\n", timeNowUnixMs())
@@ -416,8 +446,8 @@ order by cm.class_id, rm.n_ctx`)
 			continue
 		}
 		tag := f[0]
-		n, err := fmt.Sscanf(f[1], "%d", new(int))
-		if err != nil {
+		var n int
+		if _, err := fmt.Sscanf(f[1], "%d", &n); err != nil {
 			continue
 		}
 		a, ok := classes[tag]
@@ -445,7 +475,7 @@ order by cm.class_id, rm.n_ctx`)
 		if variance < 0 {
 			variance = 0
 		}
-		stddev := mathSqrt(variance)
+		stddev := math.Sqrt(variance)
 		advertised := int(math.Round(avg + stddev))
 		if advertised > a.max {
 			advertised = a.max
@@ -481,18 +511,3 @@ func newLineScanner(r io.Reader) *bufio.Scanner {
 	return sc
 }
 
-func mathSqrt(v float64) float64 {
-	// Newton's method for float64; avoids importing math for one call.
-	if v <= 0 {
-		return 0
-	}
-	x := v
-	for i := 0; i < 60; i++ {
-		y := x - (x*x-v)/(2*x)
-		if y == x {
-			return y
-		}
-		x = y
-	}
-	return x
-}

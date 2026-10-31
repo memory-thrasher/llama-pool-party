@@ -158,8 +158,9 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 	must(t, frB.Connect(context.Background()))
 
 	ctx := context.Background()
+	convKey := hexToken(32) // 64-hex continuity key (D-E1)
 	body := []byte(`WS06-BODY-MARKER-` + strings.Repeat("x", 4096))
-	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, body)
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
 	must(t, err)
 
 	// The originator holds a GET .../response (D-D6).
@@ -178,14 +179,18 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 		`{"choices":[{"delta":{"content":"WS06-RESP-MARKER-2"}}]}`,
 		"data: [DONE]",
 	}
-	must(t, frB.AcceptAndServe(ctx, jobID, len(body), "", ndjson))
+	must(t, frB.AcceptAndServe(ctx, jobID, len(body), convKey, ndjson))
 
-	// Exact relay to the originator, in order.
+	// Exact relay to the originator, in order (bounded: a relay regression
+	// must fail, not hang).
 	got := []string{}
-	for line := range rgA.Lines() {
-		got = append(got, line)
-		if line == "data: [DONE]" {
-			break
+	rgDeadline := time.After(15 * time.Second)
+	for len(got) < len(ndjson) {
+		select {
+		case line := <-rgA.Lines():
+			got = append(got, line)
+		case <-rgDeadline:
+			t.Fatalf("relay timeout: got %d lines, want %d", len(got), len(ndjson))
 		}
 	}
 	if diff := slices.Compare(got, ndjson); diff != 0 {
@@ -220,6 +225,14 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 		t.Fatalf("bad records row: %s", rows[0])
 	}
 
+	// Continuity hint recorded on completion (D-E2): same conv key, served by frB.
+	rows, err = env.db.Query(ctx, fmt.Sprintf(
+		"select conv_key, last_router_id, last_ok from continuity where conv_key = %s", pooldb.S(convKey)))
+	must(t, err)
+	if len(rows) != 1 || rows[0] != convKey+","+frB.ID()+",t" {
+		t.Fatalf("continuity rows = %v, want %s,%s,t", rows, convKey, frB.ID())
+	}
+
 	// Body staged on disk, purged on terminal (D-I2).
 	entries, err := os.ReadDir(env.dataDir + "/jobs")
 	must(t, err)
@@ -252,20 +265,16 @@ func TestE2E_Bounce_SecondAccepts(t *testing.T) {
 	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, body)
 	must(t, err)
 
-	// frA is offered first and rejects.
+	// frA is offered first; its installed policy (countingReject) decides and
+	// the decision is executed through the policy mechanism (not by hand).
 	evA, err := frA.NextEvent(ctx, 15*time.Second)
 	must(t, err)
 	if of := offerOf(t, evA); of.JobID != jobID {
 		t.Fatalf("fr-a offer for job %s, want %s", of.JobID, jobID)
 	}
-	dec := cr.Decide(offerOf(t, evA))
-	if dec.Accept {
-		t.Fatal("fr-a should reject")
-	}
-	must(t, frA.postEvent(ctx, poolproto.TypeOfferReject,
-		&poolproto.OfferReject{JobID: jobID, Reason: dec.Reason}))
+	must(t, frA.DecideAndRespond(ctx, offerOf(t, evA), len(body), "", nil))
 
-	// frB is offered next and accepts.
+	// frB is offered next and its AcceptPolicy decides+executes the serve.
 	evB, err := frB.NextEvent(ctx, 15*time.Second)
 	must(t, err)
 	if of := offerOf(t, evB); of.JobID != jobID {
@@ -275,7 +284,7 @@ func TestE2E_Bounce_SecondAccepts(t *testing.T) {
 		`{"choices":[{"delta":{"content":"WS06-B2-1"}}]}`,
 		"data: [DONE]",
 	}
-	must(t, frB.AcceptAndServe(ctx, jobID, len(body), "", ndjson))
+	must(t, frB.DecideAndRespond(ctx, offerOf(t, evB), len(body), "", ndjson))
 
 	if cr.calls != 1 {
 		t.Fatalf("fr-a decide calls = %d, want 1", cr.calls)
@@ -312,5 +321,169 @@ func TestE2E_IntakeIdempotency_RequestID(t *testing.T) {
 	must(t, err)
 	if n != 1 {
 		t.Fatalf("queue_jobs rows for request_id = %d, want 1", n)
+	}
+}
+
+// TestE2E_NoMembers_ModelGone: intake for a class nobody has loaded must
+// fail with model_gone (D-C7), mirrored to the originator with a records row.
+func TestE2E_NoMembers_ModelGone(t *testing.T) {
+	env := newE2E(t)
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+
+	ctx := context.Background()
+	body := []byte(`WS06-MG-BODY-` + strings.Repeat("m", 512))
+	// pool-text-xl: nobody has a model with this tag.
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-xl", 128, 4096, nil, body)
+	must(t, err)
+
+	// The originator's subscribe sees the error envelope (no relay for a
+	// failed job).
+	ev, err := frA.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if ev.Type != poolproto.TypeError {
+		t.Fatalf("envelope type = %s, want error", ev.Type)
+	}
+	var rep poolproto.ErrorReport
+	if err := json.Unmarshal(ev.Payload, &rep); err != nil || rep.Code != "model_gone" || rep.JobID != jobID {
+		t.Fatalf("bad error report: %v (%v)", rep, err)
+	}
+
+	// Records row: not ok, error_code = model_gone, router is null.
+	rows, err := env.db.Query(ctx, fmt.Sprintf(
+		"select ok, error_code, router_id from records where job_id = %s", pooldb.UUID(jobID)))
+	must(t, err)
+	if len(rows) != 1 {
+		t.Fatalf("records rows = %d, want 1", len(rows))
+	}
+	r := strings.Split(rows[0], ",")
+	if r[0] != "f" || r[1] != "model_gone" || r[2] != "" {
+		t.Fatalf("bad records row: %s", rows[0])
+	}
+
+	// Body staged on intake, purged on terminal.
+	entries, err := os.ReadDir(env.dataDir + "/jobs")
+	must(t, err)
+	if len(entries) != 0 {
+		t.Fatalf("body file not purged: %v", entries)
+	}
+}
+
+// TestE2E_Classes_AdvertisedCtx: advertised_ctx = min(round(avg + pop_stddev),
+// max) across loaded members (D-C1/D-C2). 32768 + 131072 -> avg 81920, pop
+// stddev 49152 -> 131072, capped at max 131072.
+func TestE2E_Classes_AdvertisedCtx(t *testing.T) {
+	env := newE2E(t)
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	must(t, frA.Connect(context.Background()))
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 131072, 1, 0, poolproto.ModelLoaded)
+	must(t, frB.Connect(context.Background()))
+
+	ctx := context.Background()
+	res, err := frA.doGet(ctx, "/pool/classes")
+	must(t, err)
+	defer res.Body.Close()
+	var envelope struct {
+		Protocol int              `json:"protocol"`
+		Classes  []map[string]any `json:"classes"`
+	}
+	must(t, json.NewDecoder(res.Body).Decode(&envelope))
+	var got map[string]any
+	for _, c := range envelope.Classes {
+		if c["tag"] == "pool-text-md" {
+			got = c
+		}
+	}
+	if got == nil {
+		t.Fatalf("pool-text-md not advertised: %v", envelope.Classes)
+	}
+	if got["member_count"].(float64) != 2 || got["min_ctx"].(float64) != 32768 || got["max_ctx"].(float64) != 131072 {
+		t.Fatalf("bad class row: %v", got)
+	}
+	if got["advertised_ctx"].(float64) != 131072 {
+		t.Fatalf("advertised_ctx = %v, want 131072", got["advertised_ctx"])
+	}
+}
+
+// TestE2E_AntiMemory_BodyNeverLogged: request/response bodies must never reach
+// the coordinator's logs or disk beyond the staged file (D-I1/D-I3). A
+// recognizable marker in the body must be absent from the log buffer.
+func TestE2E_AntiMemory_BodyNeverLogged(t *testing.T) {
+	env := newE2E(t)
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+
+	ctx := context.Background()
+	marker := `WS06-ANTIMEM-` + strings.Repeat("Q", 64)
+	body := []byte(marker + strings.Repeat("q", 4096))
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, body)
+	must(t, err)
+	rgA, err := frA.OpenResponseGet(ctx, jobID)
+	must(t, err)
+	ev, err := frA.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	nndjson := []string{`{"choices":[{"delta":{"content":"ok"}}]}`, "data: [DONE]"}
+	must(t, frA.DecideAndRespond(ctx, offerOf(t, ev), len(body), "", nndjson))
+	select {
+	case <-rgA.Done(): // wait for the full relay to drain
+	case <-time.After(10 * time.Second):
+		t.Fatal("response get did not close")
+	}
+
+	if strings.Contains(env.logs.String(), "WS06-ANTIMEM") {
+		t.Fatalf("request body marker found in coordinator logs (anti-memory violation):\n%s",
+			truncate([]byte(env.logs.String()), 4000))
+	}
+	entries, err := os.ReadDir(env.dataDir + "/jobs")
+	must(t, err)
+	if len(entries) != 0 {
+		t.Fatalf("body file not purged: %v", entries)
+	}
+}
+
+// TestE2E_ClientDisconnect_FailsJob: the originator closing its held GET
+// (D-D6) must fail the running job with client_disconnected.
+func TestE2E_ClientDisconnect_FailsJob(t *testing.T) {
+	env := newE2E(t)
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+
+	ctx := context.Background()
+	body := []byte(`WS06-DISC-BODY-` + strings.Repeat("y", 1024))
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, body)
+	must(t, err)
+	rgA, err := frA.OpenResponseGet(ctx, jobID)
+	must(t, err)
+	ev, err := frA.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	// Serve but hold: no completion, the stream stays open.
+	must(t, frA.AcceptAndHold(ctx, offerOf(t, ev).JobID))
+	time.Sleep(300 * time.Millisecond) // let the body pull settle
+	rgA.Close()
+
+	deadline := time.After(15 * time.Second)
+	for {
+		rows, err := env.db.Query(ctx, fmt.Sprintf(
+			"select ok, error_code from records where job_id = %s", pooldb.UUID(jobID)))
+		if err == nil && len(rows) == 1 {
+			r := strings.Split(rows[0], ",")
+			if r[0] != "f" || r[1] != "client_disconnected" {
+				t.Fatalf("records row = %s, want f,client_disconnected", rows[0])
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("job did not fail with client_disconnected in time")
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }

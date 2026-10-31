@@ -138,15 +138,22 @@ create table if not exists queue_jobs (
     request_id         uuid,                    -- intake idempotency key (D-G5)
     originating_router_id uuid,              -- router that owns the client socket (D-H2)
     serving_router_id   uuid,              -- current offer/serve target
+    accepted_at         timestamptz,       -- offer_accept received (gates body pull + response push)
     created_at         timestamptz not null default now(),
     updated_at        timestamptz not null default now()
 );
+-- v1 amendment (pre-release, WS-06 review): accept gate for body pull /
+-- response push (an offered-but-unaccepted router must not read the body or
+-- push a response). Existing databases: add the column idempotently.
+alter table queue_jobs add column if not exists accepted_at timestamptz;
 comment on table queue_jobs is 'Coordinator-owned job queue; fairness selection (WS-11) scans here.';
 create index if not exists queue_jobs_status_idx on queue_jobs (priority, status, created_at);
 
 -- v1 amendment (pre-release): exact idempotency on intake (WS-06): same
 -- request_id -> conflict -> return the existing job_id.
 create unique index if not exists queue_jobs_request_id_uq on queue_jobs (request_id) where request_id is not null;
+
+
 
 create table if not exists continuity (
     conv_key        text primary key,   -- 64-hex (SHA-256 of first 8KB of raw client payload, D-E1)

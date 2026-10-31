@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -72,6 +73,11 @@ func main() {
 	fmt.Printf("  started:  %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
 
 	if err := srv.Run(ctx, cfg.Addr); err != nil {
+		// context.Canceled = SIGINT/SIGTERM: a clean stop, not a failure
+		// (the supervisor must not treat shutdown as a crash).
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "coordinator: serve failed: %v\n", err)
 		os.Exit(1)
 	}

@@ -323,16 +323,17 @@ func (s *Server) MirrorTerminal(routerID, jobID string, data []byte) {
 // the coordinator never stores the response bytes (D-I4), so a pipe is just a
 // buffered channel of NDJSON lines with a closed signal; bounded (a stuck reader
 // unblocks after 30s).
+//
+// lines is NEVER closed (a send evaluated on a closed channel panics, review
+// H3). close() only flips the closed signal; the reader drains whatever is
+// still buffered after observing it.
 type relayPipe struct {
-	lines  chan string
-	closed chan struct{}
+	lines     chan string
+	closed    chan struct{}
 	closeOnce sync.Once
-	wg      sync.WaitGroup
 }
 
 func (p *relayPipe) send(line string) bool {
-	p.wg.Add(1)
-	defer p.wg.Done()
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
 	select {
@@ -345,23 +346,20 @@ func (p *relayPipe) send(line string) bool {
 	}
 }
 
-// close stops new sends, lets in-flight ones settle, then closes lines so the
-// draining reader's final receive returns ok=false (all lines relayed, in
-// order) before the stream closes. No send ever runs on a closed channel.
+// close signals end-of-stream. Lines already in flight or buffered are still
+// delivered: the reader observes closed and then drains the channel in order.
 func (p *relayPipe) close() {
-	p.closeOnce.Do(func() {
-		close(p.closed) // stop new sends
-		p.wg.Wait()    // let in-flight sends settle
-		close(p.lines) // unblock the draining reader
-	})
+	p.closeOnce.Do(func() { close(p.closed) })
 }
 
-// closePipe closes the response-relay pipe for jobID (no-op when absent).
+// closePipe closes the response-relay pipe for jobID and drops it from the
+// map (no-op when absent; idempotent with removePipe).
 func (s *Server) closePipe(jobID string) {
 	s.pipesMu.Lock()
 	defer s.pipesMu.Unlock()
 	if p, ok := s.pipes[jobID]; ok {
 		p.close()
+		delete(s.pipes, jobID)
 	}
 }
 
@@ -394,6 +392,7 @@ type jobRow struct {
 	RequestID string
 	OriginRouter string
 	ServingRouter string
+	AcceptedAt string // "" = not accepted (gates body pull / response push)
 	ConvKey string
 	CreatedAt string
 }
@@ -401,17 +400,18 @@ type jobRow struct {
 func (s *Server) jobRow(ctx context.Context, jobID string) (jobRow, bool) {
 	var r jobRow
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
-select id, user_id, class_id, status, request_id, originating_router_id, serving_router_id, conv_key, created_at
+select id, user_id, class_id, status, request_id, originating_router_id, serving_router_id,
+       coalesce(accepted_at::text, ''), conv_key, created_at
 from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 	if err != nil || len(rows) == 0 {
 		return r, false
 	}
 	f := strings.Split(rows[0], ",")
-	if len(f) < 9 {
+	if len(f) < 10 {
 		return r, false
 	}
 	r = jobRow{ID: f[0], UserID: f[1], Tag: f[2], Status: f[3], RequestID: f[4],
-		OriginRouter: f[5], ServingRouter: f[6], ConvKey: f[7], CreatedAt: f[8]}
+		OriginRouter: f[5], ServingRouter: f[6], AcceptedAt: f[7], ConvKey: f[8], CreatedAt: f[9]}
 	return r, true
 }
 

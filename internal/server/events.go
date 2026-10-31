@@ -206,12 +206,19 @@ func (s *Server) jobForEvent(r *http.Request, w http.ResponseWriter, userID, job
 }
 
 // routerOwnsJob reports whether the event's user owns the job's serving router
-// (the binding routers.owner_id == user, D-H2).
+// (the binding routers.owner_id == user, D-H2). A false result writes a 409
+// (the job state moved on, or the event is stale/foreign) - the catalog
+// requires a response on every POST /pool/events (review M: bare EOF).
 func (s *Server) routerOwnsJob(r *http.Request, w http.ResponseWriter, job jobRow, userID string) bool {
 	if job.ServingRouter == "" {
+		http.Error(w, "job has no serving router (stale event)", http.StatusConflict)
 		return false
 	}
-	return s.dbBool(r, "select 1 from routers where id = %s and owner_id = %s", job.ServingRouter, userID)
+	if !s.dbBool(r, "select 1 from routers where id = %s and owner_id = %s", job.ServingRouter, userID) {
+		http.Error(w, "job's serving router is owned by another user", http.StatusConflict)
+		return false
+	}
+	return true
 }
 
 // handleHandshakeOrCapacity upserts the routers row (owner = token's user) and
@@ -235,15 +242,23 @@ func (s *Server) handleHandshakeOrCapacity(r *http.Request, w http.ResponseWrite
 			return false
 		}
 	}
+	// Capacity events carry no router_name/software (only the handshake does).
+	// Insert falls back to a generated name; update keeps the existing values
+	// (coalesce) so a capacity event can never clobber the handshake identity
+	// (review M: NULL into the not-null column failed every capacity upsert).
+	name := routerName
+	if name == "" {
+		name = "router-" + rid[:8]
+	}
 	if err := s.db.Exec(r.Context(), fmt.Sprintf(`
 insert into routers (id, owner_id, router_name, software, last_seen_at)
 values (%s, %s, %s, %s, now())
 on conflict (id) do update set
   owner_id = excluded.owner_id,
-  router_name = excluded.router_name,
-  software = excluded.software,
+  router_name = coalesce(excluded.router_name, routers.router_name),
+  software = coalesce(excluded.software, routers.software),
   last_seen_at = excluded.last_seen_at`,
-		pooldb.UUID(rid), pooldb.UUID(userID), pooldb.S(routerName), pooldb.S(software))); err != nil {
+		pooldb.UUID(rid), pooldb.UUID(userID), pooldb.S(name), pooldb.S(software))); err != nil {
 		s.logf("events: routers upsert: %v", err)
 	}
 	s.rebuildModels(r, rid, models)

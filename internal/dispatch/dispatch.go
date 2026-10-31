@@ -77,6 +77,8 @@ type jobState struct {
 
 	BodyPulled bool
 	LeaseExpiresAt time.Time // zero = no lease armed
+	AcceptedAt time.Time // zero = offered but not accepted (gates body pull/response push)
+	TerminalAt time.Time // zero = not terminal yet (memory GC uses this)
 
 	completion poolproto.Completion // stashed from the last completion event
 }
@@ -327,6 +329,14 @@ func (d *Dispatcher) sweep() {
 		}
 	}
 
+	// Memory GC: drop terminal job state after 10 min (DB rows remain for
+	// the portal; the map otherwise grows for the coordinator's lifetime).
+	for id, j := range d.jobs {
+		if !j.TerminalAt.IsZero() && now.Sub(j.TerminalAt) > 10*time.Minute {
+			delete(d.jobs, id)
+		}
+	}
+
 	// Fair offer pass: one job at a time, per-user FIFO with users ordered by
 	// created_at (WS-11 fairness is explicitly out of scope).
 	var pick *jobState
@@ -423,12 +433,11 @@ order by rm.router_id`, pooldb.S(j.Tag)))
 		d.logf("dispatch: member query for job %s: %v", j.JobID, err)
 		return false
 	}
-	for _, row := range rows {
-		if id := strings.Split(row, ",")[0]; d.hub.Connected(id) {
-			return true
-		}
-	}
-	return false
+	// A loaded member means "may return": connectivity is enforced in the
+	// offer loop (unreachable candidates are skipped), so a loaded-but-
+	// disconnected member parks the job for retry instead of failing it
+	// with model_gone (review M: reconnects are normal).
+	return len(rows) > 0
 }
 
 // offerNext offers the job at j.CandidateIdx and persists the offered state.
@@ -444,6 +453,7 @@ func (d *Dispatcher) offerNext(j *jobState) {
 		j.Status = stOffered
 		j.LeaseExpiresAt = time.Time{}
 		j.NextOfferAt = time.Time{}
+		j.AcceptedAt = time.Time{} // fresh offer: not accepted yet
 		env := poolproto.Event{Type: poolproto.TypeWorkOffer, Payload: mustJSON(poolproto.WorkOffer{
 			JobID: j.JobID, Tag: j.Tag,
 			EstPromptTokens: j.EstPromptTokens, EstCtxNeeded: j.EstCtxNeeded,
@@ -480,6 +490,11 @@ func (d *Dispatcher) parkJob(j *jobState, why string) {
 	j.Status = stPending
 	j.CurrentCandidate = ""
 	j.ServingRouterID = ""
+	j.AcceptedAt = time.Time{}
+	// A fresh offer pass starts from the first candidate; in-pass rejections
+	// are already counted in Bounces (review H1: a stale index wedged the job
+	// until expiry).
+	j.CandidateIdx = 0
 	j.LeaseExpiresAt = time.Time{}
 	j.NextOfferAt = time.Now().Add(d.parkDelay)
 	d.persistStatus(j, stPending)
@@ -584,6 +599,8 @@ func (d *Dispatcher) accept(op dispatchOp, errOut chan error) {
 		lease = d.leaseDefaultMS
 	}
 	j.LeaseExpiresAt = time.Now().Add(time.Duration(lease) * time.Millisecond)
+	j.AcceptedAt = time.Now() // body pull + response push now allowed (review H2)
+	d.persistStatus(j, stOffered)
 	d.logf("dispatch: job %s accepted by %s; lease %dms", j.JobID, short(j.CurrentCandidate), lease)
 }
 
@@ -627,16 +644,18 @@ func (d *Dispatcher) errorReport(op dispatchOp, errOut chan error) {
 			d.parkJob(j, fmt.Sprintf("pre_token error: bounce limit %d (D-G1)", d.maxBounces))
 			return
 		}
-		if j.Status == stOffered {
-			j.CandidateIdx++
+		j.CandidateIdx++ // skip the router that errored (offered or running)
+		if j.Status == stRunning {
+			// Body was already pulled: reset the round, the next candidate
+			// re-pulls the staged body (review M: pre_token on running jobs
+			// was silently skipped).
+			j.BodyPulled = false
 		}
 		d.records(j, false, op.code,
 			firstIntPtr(op.pt), firstIntPtr(op.rt),
 			firstIntPtr(op.tq), firstIntPtr(op.ts))
 		d.logf("dispatch: job %s pre-token %s; re-offering (%d/%d bounces)", j.JobID, op.code, j.Bounces, d.maxBounces)
-		if j.Status == stOffered {
-			d.offerNext(j)
-		}
+		d.offerNext(j)
 	case poolproto.StageMidStream:
 		d.failJob(j, op.code, op.message,
 			firstIntPtr(op.pt), firstIntPtr(op.rt),
@@ -664,6 +683,7 @@ func (d *Dispatcher) complete(op dispatchOp, errOut chan error) {
 	j.BodyPulled = true
 	j.CurrentCandidate = ""
 	j.NextOfferAt = time.Time{}
+	j.TerminalAt = time.Now()
 	d.persistStatus(j, stDone)
 
 	d.recordsDone(j, pt, rt, comp.CachedTokens, tq, ts, comp.StopReason)
@@ -745,6 +765,8 @@ func (d *Dispatcher) failJob(j *jobState, code, message string, pt, rt, tq, ts i
 	j.Status = stFailed
 	j.CurrentCandidate = ""
 	j.ServingRouterID = ""
+	j.AcceptedAt = time.Time{}
+	j.TerminalAt = time.Now()
 	j.NextOfferAt = time.Time{}
 	d.persistStatus(j, stFailed)
 	d.records(j, false, code, pt, rt, tq, ts)
@@ -759,7 +781,17 @@ func (d *Dispatcher) failJob(j *jobState, code, message string, pt, rt, tq, ts i
 		data, _ := json.Marshal(env)
 		d.hub.MirrorTerminal(j.OriginRouter, j.JobID, data)
 	}
-	d.logf("dispatch: job %s failed %s (%s)", j.JobID, code, message)
+	// Router-supplied text: bound it before it reaches the log (a rogue member
+	// must not inject arbitrary log lines; the catalog caps messages at 200).
+	d.logf("dispatch: job %s failed %s (%s)", j.JobID, code, capMsg(message))
+}
+
+func capMsg(s string) string {
+	r := []rune(s)
+	if len(r) > 200 {
+		return string(r[:200]) + "..."
+	}
+	return s
 }
 
 func (d *Dispatcher) purgeBody(j *jobState) {
@@ -848,9 +880,13 @@ func (d *Dispatcher) persistStatus(j *jobState, status string) {
 	if j.ServingRouterID != "" {
 		serving = pooldb.UUID(j.ServingRouterID)
 	}
+	accepted := "NULL"
+	if !j.AcceptedAt.IsZero() {
+		accepted = "now()"
+	}
 	stmt := fmt.Sprintf(`
-update queue_jobs set status = %s, serving_router_id = %s, updated_at = now()
-where id = %s`, pooldb.S(status), serving, pooldb.UUID(j.JobID))
+update queue_jobs set status = %s, serving_router_id = %s, accepted_at = %s, updated_at = now()
+where id = %s`, pooldb.S(status), serving, accepted, pooldb.UUID(j.JobID))
 	if err := d.db.Exec(context.Background(), stmt); err != nil {
 		d.logf("dispatch: persistStatus %s job %s: %v", status, j.JobID, err)
 	}

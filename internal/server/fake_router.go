@@ -298,11 +298,14 @@ func (fr *FakeRouter) Intake(ctx context.Context, reqID, tag string, estPrompt, 
 }
 
 // OpenResponseGet opens the client-held GET /pool/jobs/{id}/response and
-// returns a ResponseGet that streams the relayed NDJSON lines.
+// returns a ResponseGet that streams the relayed NDJSON lines. The request
+// runs on a derived context so Close() can disconnect it.
 func (fr *FakeRouter) OpenResponseGet(ctx context.Context, jobID string) (*ResponseGet, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/pool/jobs/%s/response", fr.baseURL, jobID), nil)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
@@ -310,10 +313,12 @@ func (fr *FakeRouter) OpenResponseGet(ctx context.Context, jobID string) (*Respo
 	req.Header.Set("X-Pool-Router-Id", fr.id)
 	resp, err := fr.client.Do(req)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		cancel()
 		return nil, fmt.Errorf("open response: status %d", resp.StatusCode)
 	}
 
@@ -321,9 +326,27 @@ func (fr *FakeRouter) OpenResponseGet(ctx context.Context, jobID string) (*Respo
 		lines:  make(chan string, 16),
 		done:   make(chan error, 1),
 		ctx:    ctx,
+		cancel: cancel,
+		body:   resp.Body,
 	}
 	go g.readLoop(resp.Body)
 	return g, nil
+}
+
+// DecideAndRespond runs the installed offer policy against a work_offer and
+// executes the decision (accept+serve, or reject). This wires the scripted
+// policy to the event stream so counting policies observe real router traffic
+// (the reviewer's "nominal policy" point).
+func (fr *FakeRouter) DecideAndRespond(ctx context.Context, offer poolproto.WorkOffer, bodyBytes int, convKey string, ndjson []string) error {
+	fr.mu.Lock()
+	policy := fr.policy
+	fr.mu.Unlock()
+	dec := policy.Decide(offer)
+	if dec.Accept {
+		return fr.AcceptAndServe(ctx, offer.JobID, bodyBytes, convKey, ndjson)
+	}
+	return fr.postEvent(ctx, poolproto.TypeOfferReject,
+		&poolproto.OfferReject{JobID: offer.JobID, Reason: dec.Reason})
 }
 
 // AcceptAndServe runs the serving-router flow for a job: accept
@@ -392,6 +415,26 @@ func (fr *FakeRouter) AcceptAndServe(ctx context.Context, jobID string, bodyByte
 		StopReason:   strPtr("finish_reason"),
 		ServedBy:    fr.id,
 	})
+}
+
+// AcceptAndHold accepts the offer and pulls the body but streams no response
+// and posts no completion - the job stays running until the originator
+// disconnects (client_disconnected) or the lease expires.
+func (fr *FakeRouter) AcceptAndHold(ctx context.Context, jobID string) error {
+	modelID, nCtx, err := fr.currentModel(jobID)
+	if err != nil {
+		return err
+	}
+	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
+	}); err != nil {
+		return fmt.Errorf("offer_accept: %w", err)
+	}
+	fr.pullBody(ctx, jobID)
+	return nil
 }
 
 // StreamResponse streams the NDJSON response with a fixed gap between
@@ -484,6 +527,8 @@ type ResponseGet struct {
 	lines  chan string
 	done   chan error
 	ctx    context.Context
+	cancel context.CancelFunc
+	body   io.ReadCloser
 	mu     sync.Mutex
 	closed bool
 }
@@ -495,31 +540,44 @@ func (g *ResponseGet) Lines() <-chan string { return g.lines }
 // client-side).
 func (g *ResponseGet) Done() <-chan error { return g.done }
 
-// Close gives up on the GET (D-D6 client disconnect).
+// Close gives up on the GET (D-D6 client disconnect): cancels the request
+// context and closes the body so the server sees the disconnect and fails
+// the job (client_disconnected).
 func (g *ResponseGet) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.closed {
 		g.closed = true
+		if g.cancel != nil {
+			g.cancel()
+		}
+		if g.body != nil {
+			g.body.Close()
+		}
 	}
 }
 
 // readLoop parses the SSE stream: "data: <ndjson line>" lines are
-// relayed; ": hb <ms>" heartbeats and blank lines are skipped.
+// relayed; ": hb <ms>" heartbeats and blank lines are skipped. Exits on
+// client Close() or when the server closes the stream.
 func (g *ResponseGet) readLoop(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for sc.Scan() {
+		select {
+		case <-g.ctx.Done():
+			return
+		default:
+		}
 		line := sc.Text()
-		switch {
-		case strings.HasPrefix(line, "data: "):
+		if strings.HasPrefix(line, "data: ") {
 			select {
 			case g.lines <- line[len("data: "):]:
 			case <-g.ctx.Done():
 				return
 			}
-		// heartbeat ": hb ..." and blank lines are skipped
 		}
+		// heartbeat ": hb ..." and blank lines are skipped
 	}
 	// Server closed the stream (job ended): report clean close.
 	select {

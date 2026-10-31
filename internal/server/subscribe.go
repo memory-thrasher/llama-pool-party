@@ -91,7 +91,8 @@ func (s *Server) serveLongPoll(w http.ResponseWriter, r *http.Request, routerID 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	var envelopes []map[string]any
+	// Non-nil: the catalog promises a (possibly empty) JSON list.
+	envelopes := []map[string]any{}
 	select {
 	case <-ses.notify:
 	case <-timer.C:
