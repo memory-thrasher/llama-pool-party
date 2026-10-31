@@ -46,6 +46,20 @@ func TestExamplesDecode(t *testing.T) {
 				}
 				return
 			}
+			if expected == "class_advertisement" {
+				var ca ClassAdvertisement
+				if err := json.Unmarshal(raw, &ca); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				out, err := json.Marshal(&ca)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+					t.Errorf("round-trip mismatch:\ngot  %s\nwant %s", out, raw)
+				}
+				return
+			}
 			var ev Event
 			if err := json.Unmarshal(raw, &ev); err != nil {
 				t.Fatalf("decode envelope: %v", err)
@@ -87,6 +101,9 @@ func TestDecodeUnknownType(t *testing.T) {
 func expectedTypeFor(stem string) string {
 	if stem == "job_intake" {
 		return "job_intake"
+	}
+	if stem == "class_advertisement" {
+		return "class_advertisement"
 	}
 	types := []string{
 		TypeHandshake, TypeCapacity, TypeWorkOffer, TypeOfferAccept,

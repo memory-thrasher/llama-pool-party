@@ -12,3 +12,6 @@
 
 # Local scratch state (never commit)
 *.local.sql
+
+# Local agent definitions
+.pi/

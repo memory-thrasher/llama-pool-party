@@ -64,6 +64,8 @@ comment on table routers is 'Connected member routers (outbound-only, D-A2/D-K1)
 -- spec's index wording).
 create unique index if not exists routers_active_owner_name_uq on routers (owner_id, router_name) where deleted_at is null;
 
+-- v1 amendment (pre-release): 'gone' status for models announced
+-- unloaded by eviction_notice (WS-06 dispatch engine, D-D6).
 create table if not exists router_models (
     id         bigserial primary key,
     router_id  uuid not null references routers(id) on delete cascade,
@@ -73,7 +75,7 @@ create table if not exists router_models (
     n_embd    int not null default 0,
     n_slots    int not null default 1,
     busy_slots int not null default 0,
-    status     text not null default 'loaded' check (status in ('loaded', 'excluded')),
+    status     text not null default 'loaded' check (status in ('loaded', 'excluded', 'gone')),
     vram_mb    int,
     updated_at timestamptz not null default now()
 );
@@ -122,6 +124,8 @@ create table if not exists batches (
 );
 comment on table batches is 'Batch job containers; per-job queue rows arrive in WS-10.';
 
+-- v1 amendment (pre-release): request_id/originating_router_id/serving_router_id
+-- (WS-06 intake idempotency D-G5, origin tracking D-H2, dispatch state D-D2).
 create table if not exists queue_jobs (
     id                 uuid primary key,   -- job_id
     user_id            uuid not null references users(id) on delete cascade,
@@ -131,11 +135,18 @@ create table if not exists queue_jobs (
     est_ctx_needed     int not null default 0,
     conv_key         text check (conv_key is null or length(conv_key) = 64),
     status           text not null default 'pending' check (status in ('pending', 'offered', 'running', 'done', 'failed', 'evicted', 'expired')),
+    request_id         uuid,                    -- intake idempotency key (D-G5)
+    originating_router_id uuid,              -- router that owns the client socket (D-H2)
+    serving_router_id   uuid,              -- current offer/serve target
     created_at         timestamptz not null default now(),
     updated_at        timestamptz not null default now()
 );
 comment on table queue_jobs is 'Coordinator-owned job queue; fairness selection (WS-11) scans here.';
 create index if not exists queue_jobs_status_idx on queue_jobs (priority, status, created_at);
+
+-- v1 amendment (pre-release): exact idempotency on intake (WS-06): same
+-- request_id -> conflict -> return the existing job_id.
+create unique index if not exists queue_jobs_request_id_uq on queue_jobs (request_id) where request_id is not null;
 
 create table if not exists continuity (
     conv_key        text primary key,   -- 64-hex (SHA-256 of first 8KB of raw client payload, D-E1)

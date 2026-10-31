@@ -197,3 +197,17 @@ type JobIntake struct {
 	ConvKey         *string `json:"conv_key"`
 	ClientHint      *string `json:"client_hint"` // e.g. harness name; metadata only
 }
+
+// ClassAdvertisement is the body of GET /pool/classes (catalog §6, D-C8).
+type ClassAdvertisement struct {
+	Protocol int            `json:"protocol"`
+	Classes  []ClassSummary `json:"classes"`
+}
+
+type ClassSummary struct {
+	Tag           string `json:"tag"`
+	MemberCount   int    `json:"member_count"`
+	AdvertisedCtx int    `json:"advertised_ctx"`
+	MinCtx        int    `json:"min_ctx"`
+	MaxCtx        int    `json:"max_ctx"`
+}
