@@ -176,6 +176,9 @@ delete from class_members where router_id = %s and model_id = %s`,
 		for _, jid := range evn.EvictedJobs {
 			_ = s.disp.InternalReject(jid, rid, evn.ModelID, poolproto.RejectEvicted)
 		}
+		// D-E4/D-E6: pending jobs whose continuity hint names this member are
+		// denied with reason=evicted.
+		_ = s.disp.HintEvicted(rid)
 		ok()
 
 	default:

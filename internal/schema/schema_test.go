@@ -138,6 +138,8 @@ func TestApplyTwiceScratchDB(t *testing.T) {
 	checkCount("select count(*) from classes", "6")
 	checkCount("select count(*) from user_tokens", "1")
 	checkCount("select count(*) from users where email = 'admin'", "1")
+	// 5. WS-08: the D-E6 continuity metrics columns exist on records.
+	checkCount("select count(*) from information_schema.columns where table_name = 'records' and column_name in ('cont_outcome', 'cont_reason')", "2")
 }
 
 // bootstrapSQLPath locates sql/bootstrap_admin.sql relative to this source file.

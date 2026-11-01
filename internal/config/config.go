@@ -28,6 +28,14 @@ const (
 	// DefaultHeartbeatMS is the SSE heartbeat interval on /pool/subscribe
 	// (POOL_HEARTBEAT_MS).
 	DefaultHeartbeatMS = 25000
+	// DefaultContIdleMS is the skip-the-line window, ms (POOL_CONT_IDLE_MS,
+	// D-E2): a continuation is served ahead of the queue on the member that
+	// last served the conversation while it is plausibly still cached.
+	DefaultContIdleMS = 60000
+	// DefaultContPreferMS is the soft-preference window, ms (POOL_CONT_PREFER_MS,
+	// D-E2/D-E3): beyond the skip window, up to this age, the hinted member is
+	// still offered first - no queue priority.
+	DefaultContPreferMS = 600000
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -48,6 +56,11 @@ type Config struct {
 	MaxBounces int
 	// HeartbeatMS is the SSE heartbeat interval (POOL_HEARTBEAT_MS).
 	HeartbeatMS int
+	// ContIdleMS is the skip-the-line window, ms (POOL_CONT_IDLE_MS, D-E2).
+	ContIdleMS int
+	// ContPreferMS is the soft-preference window, ms (POOL_CONT_PREFER_MS,
+	// D-E2/D-E3).
+	ContPreferMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -69,6 +82,8 @@ func Load() (Config, error) {
 		OfferLeaseMS: atoi(env("POOL_OFFER_LEASE_MS", ""), DefaultOfferLeaseMS),
 		MaxBounces:  atoi(env("POOL_MAX_BOUNCES", ""), DefaultMaxBounces),
 		HeartbeatMS: atoi(env("POOL_HEARTBEAT_MS", ""), DefaultHeartbeatMS),
+		ContIdleMS:   atoi(env("POOL_CONT_IDLE_MS", ""), DefaultContIdleMS),
+		ContPreferMS: atoi(env("POOL_CONT_PREFER_MS", ""), DefaultContPreferMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)

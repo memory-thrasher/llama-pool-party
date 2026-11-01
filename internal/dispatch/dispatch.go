@@ -82,12 +82,33 @@ type jobState struct {
 	// changes mid-pass. Reset to nil by parkJob to start a fresh pass.
 	passCands []candidate
 
+	// Continuity (D-E2/D-E3): Cont is the conversation's hint snapshot captured
+	// at register (nil = first turn of the conversation); contPriority/contEvicted
+	// feed the decision; contOutcome/contReason is the D-E6 outcome, decided at
+	// the first offer and finalized at completion.
+	Cont         *contHint
+	contPriority bool
+	contEvicted  bool
+	contOutcome  string // '', 'skip', 'warm', 'cold', 'denied'
+	contReason   string // '', 'idle', 'gone', 'error', 'evicted'
+	contDecided  bool
+
 	BodyPulled bool
 	LeaseExpiresAt time.Time // zero = no lease armed
 	AcceptedAt time.Time // zero = offered but not accepted (gates body pull/response push)
 	TerminalAt time.Time // zero = not terminal yet (memory GC uses this)
 
 	completion poolproto.Completion // stashed from the last completion event
+}
+
+// contHint is the continuity snapshot for a job's conversation (D-E2):
+// the member that last served it, when, and whether that service completed
+// cleanly.
+type contHint struct {
+	routerID string
+	modelID  string
+	servedAt time.Time
+	lastOK   bool
 }
 
 type opKind uint8
@@ -103,6 +124,7 @@ const (
 	opFailClientDisconnected
 	opAffinity
 	opInternalReject
+	opContEvicted
 )
 
 type dispatchOp struct {
@@ -132,6 +154,8 @@ type Dispatcher struct {
 	leaseDefaultMS int
 	jobExpiry time.Duration
 	parkDelay time.Duration
+	contIdleMS   time.Duration // POOL_CONT_IDLE_MS (D-E2 skip window)
+	contPreferMS time.Duration // POOL_CONT_PREFER_MS (D-E2 soft preference)
 	purge Purger
 	bodyReady func(jobID string) bool // e2e fix: gates offerNext on the staged body
 
@@ -155,6 +179,12 @@ type Opts struct {
 	// file. A job is only offerable once the body is staged (catalog: "the
 	// coordinator treats the job as *queued* when the body PUT completes").
 	BodyReady func(jobID string) bool
+	// ContIdleMS is the skip-the-line window in ms (POOL_CONT_IDLE_MS, D-E2);
+	// 0 takes the default (60s).
+	ContIdleMS int
+	// ContPreferMS is the soft-preference window in ms (POOL_CONT_PREFER_MS,
+	// D-E2/D-E3); 0 takes the default (600s).
+	ContPreferMS int
 }
 
 func (o Opts) withDefaults() Opts {
@@ -170,6 +200,12 @@ func (o Opts) withDefaults() Opts {
 	if o.ParkDelay <= 0 {
 		o.ParkDelay = 5 * time.Second
 	}
+	if o.ContIdleMS <= 0 {
+		o.ContIdleMS = config.DefaultContIdleMS
+	}
+	if o.ContPreferMS <= 0 {
+		o.ContPreferMS = config.DefaultContPreferMS
+	}
 	return o
 }
 
@@ -182,6 +218,7 @@ func New(db *pooldb.DB, hub RouterHub, opts Opts, purge Purger) *Dispatcher {
 		leaseDefaultMS: opts.LeaseDefaultMS,
 		jobExpiry: opts.JobExpiry,
 		parkDelay: opts.ParkDelay,
+		contIdleMS: time.Duration(opts.ContIdleMS) * time.Millisecond, contPreferMS: time.Duration(opts.ContPreferMS) * time.Millisecond,
 		purge: purge,
 		bodyReady: opts.BodyReady,
 		jobs: make(map[string]*jobState),
@@ -311,6 +348,13 @@ func (d *Dispatcher) FailClientDisconnected(jobID string) error {
 	return d.enqueue(dispatchOp{kind: opFailClientDisconnected, jobID: jobID})
 }
 
+// HintEvicted marks the pending jobs whose continuity hint names routerID
+// (D-E4, D-E6): a capacity/unload event dropped the hinted member, so their
+// skip is denied with reason=evicted instead of gone.
+func (d *Dispatcher) HintEvicted(routerID string) error {
+	return d.enqueue(dispatchOp{kind: opContEvicted, routerID: routerID})
+}
+
 // sweep is called every second: lease expiry, job expiry, parked retries, and the
 // fair offer pass.
 func (d *Dispatcher) sweep() {
@@ -350,11 +394,25 @@ func (d *Dispatcher) sweep() {
 		}
 	}
 
-	// Fair offer pass: one job at a time, per-user FIFO with users ordered by
-	// created_at (WS-11 fairness is explicitly out of scope).
-	var pick *jobState
+	// Fair offer pass: one job at a time. A warm continuation (D-E2 skip-
+	// the-line) is picked before the older jobs; within each group, per-user
+	// FIFO with users ordered by created_at (WS-11 fairness is out of scope).
+	pick := pickFair(d.jobs, now, func(j *jobState) bool { return d.isWarmHint(j, now) })
+	if pick != nil {
+		if d.isWarmHint(pick, now) {
+			pick.contPriority = true
+		}
+		d.offerNext(pick)
+	}
+}
+
+// pickFair returns the pending job to offer next (or nil): warm-continuation
+// jobs (isWarm) before the rest, and within each group per-user FIFO with
+// users ordered by created_at. Jobs parked until NextOfferAt are not eligible.
+func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) bool) *jobState {
+	var warmPick, pick *jobState
 	var pickKey time.Time
-	for _, j := range d.jobs {
+	for _, j := range jobs {
 		if j.Status != stPending {
 			continue
 		}
@@ -362,13 +420,31 @@ func (d *Dispatcher) sweep() {
 		if !t.IsZero() && now.Before(t) {
 			continue
 		}
+		if isWarm(j) {
+			if warmPick == nil || t.Before(warmPick.NextOfferAt) ||
+				(t.Equal(warmPick.NextOfferAt) && beforeInLine(j, warmPick)) {
+				warmPick = j
+			}
+			continue
+		}
 		if pick == nil || t.Before(pickKey) || (t.Equal(pickKey) && beforeInLine(j, pick)) {
 			pick, pickKey = j, t
 		}
 	}
-	if pick != nil {
-		d.offerNext(pick)
+	if warmPick != nil {
+		return warmPick
 	}
+	return pick
+}
+
+// isWarmHint reports whether j's continuation hint grants skip-the-line
+// priority (D-E2): the last service of the conversation completed cleanly and
+// the member is still plausibly cached (idle < POOL_CONT_IDLE_MS).
+func (d *Dispatcher) isWarmHint(j *jobState, now time.Time) bool {
+	if j.Cont == nil || !j.Cont.lastOK {
+		return false
+	}
+	return now.Sub(j.Cont.servedAt) < d.contIdleMS
 }
 
 // beforeInLine orders two pending jobs per-user FIFO, users by created_at.
@@ -453,6 +529,101 @@ order by rm.router_id`, pooldb.S(j.Tag)))
 	return len(rows) > 0
 }
 
+// contHintActive reports whether j's hint is usable at all (D-E2/D-E3): the
+// last service completed cleanly, a member is recorded, and the hint has not
+// fully expired (age < POOL_CONT_PREFER_MS).
+func (d *Dispatcher) contHintActive(j *jobState) bool {
+	return j.Cont != nil && j.Cont.lastOK && j.Cont.routerID != "" &&
+		time.Since(j.Cont.servedAt) < d.contPreferMS
+}
+
+// frontContHint moves the hinted router to the front of the pass's candidate
+// list (D-E2/D-E3): the selectCandidates order (context headroom) still
+// applies behind it. A hint whose member is not a valid candidate
+// (disconnected, evicted, unloaded, or with no free slot) is left in place
+// and the normal list is offered (D-E3: no slot is ever reserved).
+func (d *Dispatcher) frontContHint(j *jobState) {
+	if !d.contHintActive(j) {
+		return
+	}
+	cands := j.passCands
+	for i, c := range cands {
+		if c.routerID != j.Cont.routerID {
+			continue
+		}
+		if i > 0 {
+			j.passCands = append([]candidate{c}, append(cands[:i], cands[i+1:]...)...)
+		}
+		return
+	}
+}
+
+// decideCont records the D-E6 continuity outcome at the first offer:
+//
+//	'skip'   warm hint: queue priority granted AND the hinted router is offered first
+//	'warm'   hint honored without priority (soft pin); finalized to 'cold'
+//	         at completion when another member actually serves
+//	'cold'   continuation attempted (hint existed) but the hinted router is
+//	         not offered first
+//	'denied' guard failed (D-E4): reason 'error' (last service failed),
+//	         'evicted' (a capacity event dropped the member), 'gone'
+//	         (member not a valid candidate)
+//
+// A job with no hint row (first turn) is not a continuation: the outcome
+// stays null. One log line per decision, ids/counts only (anti-memory).
+func (d *Dispatcher) decideCont(j *jobState) {
+	if j.contDecided {
+		return
+	}
+	j.contDecided = true
+	if j.Cont == nil {
+		return
+	}
+	if !j.Cont.lastOK {
+		d.setContDecision(j, "denied", "error") // D-E4: failed service invalidates the hint
+		return
+	}
+	if !d.contHintActive(j) {
+		if j.Cont.routerID == "" {
+			d.setContDecision(j, "denied", "gone") // no member recorded for the conversation
+		}
+		// else: hint fully expired - not a continuation, outcome stays null
+		return
+	}
+	hintFirst := len(j.passCands) > 0 && j.passCands[0].routerID == j.Cont.routerID
+	if j.contPriority {
+		if hintFirst {
+			d.setContDecision(j, "skip", "")
+		} else if j.contEvicted {
+			d.setContDecision(j, "denied", "evicted")
+		} else {
+			d.setContDecision(j, "denied", "gone")
+		}
+		return
+	}
+	// No queue priority: the hint only fronts the candidate list (D-E3).
+	// The 'idle' reason marks that the skip window had passed (D-E6).
+	reason := ""
+	if time.Since(j.Cont.servedAt) >= d.contIdleMS {
+		reason = "idle"
+	}
+	if hintFirst {
+		d.setContDecision(j, "warm", reason)
+	} else {
+		d.setContDecision(j, "cold", reason)
+	}
+}
+
+// setContDecision stores the D-E6 outcome and logs the decision (ids only).
+func (d *Dispatcher) setContDecision(j *jobState, outcome, reason string) {
+	j.contOutcome, j.contReason = outcome, reason
+	if reason == "" {
+		reason = "-"
+	}
+	d.logf("dispatch: continuity job %s outcome=%s reason=%s (hint %s)",
+		j.JobID, outcome, reason, short(j.Cont.routerID))
+}
+
 // offerNext offers the job at j.CandidateIdx and persists the offered state.
 // Exhaustion parks the job (retry after the park delay); a class with no
 // members at all fails it with model_gone (D-C7).
@@ -474,10 +645,26 @@ func (d *Dispatcher) offerNext(j *jobState) {
 	// never dispatched). Capturing once keeps the index stable for the pass.
 	if j.passCands == nil {
 		j.passCands = d.selectCandidates(j)
+		d.frontContHint(j) // D-E2/D-E3: hinted router to the front of the list
+		d.decideCont(j)    // D-E6: record the continuity outcome
+	}
+	// Catalog 3.3: the offer that fronts the hinted router is marked "skip"
+	// (skip-the-line pick) or "pin" (soft preference); the rest stay "queue".
+	contSource := poolproto.SourceQueue
+	if d.contHintActive(j) {
+		if j.contPriority {
+			contSource = poolproto.SourceSkip
+		} else {
+			contSource = poolproto.SourcePin
+		}
 	}
 	cands := j.passCands
 	for j.CandidateIdx < len(cands) {
 		c := cands[j.CandidateIdx]
+		source := poolproto.SourceQueue
+		if contSource != poolproto.SourceQueue && c.routerID == j.Cont.routerID {
+			source = contSource
+		}
 		j.CurrentCandidate = c.routerID
 		j.CandidateModel = c.modelID
 		j.ServingRouterID = c.routerID
@@ -489,7 +676,7 @@ func (d *Dispatcher) offerNext(j *jobState) {
 			JobID: j.JobID, Tag: j.Tag,
 			EstPromptTokens: j.EstPromptTokens, EstCtxNeeded: j.EstCtxNeeded,
 			DeadlineMS: nil, Priority: j.Priority,
-			Source: poolproto.SourceQueue, ConvKey: convKeyPtr(j.ConvKey),
+			Source: source, ConvKey: convKeyPtr(j.ConvKey),
 		})}
 		data, err := json.Marshal(env)
 		if err != nil {
@@ -555,6 +742,8 @@ func (d *Dispatcher) applyOp(op dispatchOp) {
 		d.affinity(op, op.errOut)
 	case opInternalReject:
 		d.internalReject(op, op.errOut)
+	case opContEvicted:
+		d.contEvicted(op, op.errOut)
 	}
 }
 
@@ -599,7 +788,37 @@ from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 	if err := d.fixUserCreatedAt(d.jobs[jobID]); err != nil {
 		d.logf("dispatch: fix user created_at for job %s: %v", jobID, err)
 	}
+	d.loadContHint(d.jobs[jobID])
 	d.logf("dispatch: registered job %s (tag %s, est_ctx %d)", jobID, d.jobs[jobID].Tag, d.jobs[jobID].EstCtxNeeded)
+}
+
+// loadContHint snapshots the job's conversation continuity row (D-E2) at
+// register; j.Cont stays nil when the conversation has no row yet (first
+// turn, not a continuation).
+func (d *Dispatcher) loadContHint(j *jobState) {
+	if j.ConvKey == "" {
+		return
+	}
+	rows, err := d.db.Query(context.Background(), fmt.Sprintf(`
+select last_router_id, last_model_id, last_served_at, last_ok
+from continuity where conv_key = %s`, pooldb.S(j.ConvKey)))
+	if err != nil {
+		d.logf("dispatch: continuity lookup job %s: %v", j.JobID, err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	f := strings.Split(rows[0], ",")
+	if len(f) < 4 {
+		return
+	}
+	servedAt, perr := parseTS(f[2])
+	if perr != nil {
+		d.logf("dispatch: continuity lookup job %s: parse last_served_at: %v", j.JobID, perr)
+		return
+	}
+	j.Cont = &contHint{routerID: f[0], modelID: f[1], servedAt: servedAt, lastOK: f[3] == "t"}
 }
 
 func (d *Dispatcher) fixUserCreatedAt(j *jobState) error {
@@ -732,6 +951,12 @@ func (d *Dispatcher) complete(op dispatchOp, errOut chan error) {
 
 // recordsDone inserts the D-I3 telemetry row for a successful job.
 func (d *Dispatcher) recordsDone(j *jobState, pt, rt int, cached *int, tq, ts int, stopReason *string) {
+	// D-E6 finalization: 'warm' (hint honored, no priority) only stands when
+	// the hinted member actually served; another member serving is 'cold'.
+	if j.contOutcome == "warm" && j.Cont != nil && j.Cont.routerID != "" &&
+		j.ServingRouterID != j.Cont.routerID {
+		j.contOutcome = "cold"
+	}
 	stopReasonSQL := pooldb.S("")
 	if stopReason != nil {
 		stopReasonSQL = pooldb.S(*stopReason)
@@ -739,11 +964,13 @@ func (d *Dispatcher) recordsDone(j *jobState, pt, rt int, cached *int, tq, ts in
 	stmt := fmt.Sprintf(`
 insert into records (job_id, user_id, class_id, model_id, router_id, priority,
                    prompt_tokens, response_tokens, cached_tokens,
-                   t_queued_ms, t_service_ms, ok, error_code, stop_reason, created_at)
-values (%s, %s, %s, %s, %s, %s, %d, %d, %s, %d, %d, %t, NULL, %s, now())`,
+                   t_queued_ms, t_service_ms, ok, error_code, stop_reason,
+                   cont_outcome, cont_reason, created_at)
+values (%s, %s, %s, %s, %s, %s, %d, %d, %s, %d, %d, %t, NULL, %s, %s, %s, now())`,
 		pooldb.UUID(j.JobID), pooldb.UUID(j.UserID), pooldb.S(j.Tag), pooldb.S(j.CandidateModel),
 		pooldb.UUID(j.ServingRouterID), pooldb.S(j.Priority), pt, rt,
-		nullInt(cached), tq, ts, true, stopReasonSQL)
+		nullInt(cached), tq, ts, true, stopReasonSQL,
+		pooldb.S(j.contOutcome), pooldb.S(j.contReason))
 	if err := d.db.Exec(context.Background(), stmt); err != nil {
 		d.logf("dispatch: records insert job %s: %v", j.JobID, err)
 	}
@@ -754,12 +981,36 @@ func (d *Dispatcher) records(j *jobState, ok bool, errorCode string, pt, rt, tq,
 	stmt := fmt.Sprintf(`
 insert into records (job_id, user_id, class_id, model_id, router_id, priority,
                    prompt_tokens, response_tokens, cached_tokens,
-                   t_queued_ms, t_service_ms, ok, error_code, stop_reason, created_at)
-values (%s, %s, %s, %s, %s, %s, %d, %d, NULL, %d, %d, %t, %s, NULL, now())`,
+                   t_queued_ms, t_service_ms, ok, error_code, stop_reason,
+                   cont_outcome, cont_reason, created_at)
+values (%s, %s, %s, %s, %s, %s, %d, %d, NULL, %d, %d, %t, %s, NULL, %s, %s, now())`,
 		pooldb.UUID(j.JobID), pooldb.UUID(j.UserID), pooldb.S(j.Tag), pooldb.S(j.CandidateModel),
-		pooldb.UUID(j.ServingRouterID), pooldb.S(j.Priority), pt, rt, tq, ts, ok, pooldb.S(errorCode))
+		pooldb.UUID(j.ServingRouterID), pooldb.S(j.Priority), pt, rt, tq, ts, ok, pooldb.S(errorCode),
+		pooldb.S(j.contOutcome), pooldb.S(j.contReason))
 	if err := d.db.Exec(context.Background(), stmt); err != nil {
 		d.logf("dispatch: records insert job %s: %v", j.JobID, err)
+	}
+}
+
+// upsertContinuityFailed marks the conversation's hint as failed (D-E4):
+// the next same-conversation request gets no skip or pin (denied, reason
+// =error). A job that never got a serving router keeps the previous hint's
+// member on record (coalesce).
+func (d *Dispatcher) upsertContinuityFailed(j *jobState) {
+	if j.ConvKey == "" {
+		return
+	}
+	stmt := fmt.Sprintf(`
+insert into continuity (conv_key, last_router_id, last_model_id, last_served_at, last_ok)
+values (%s, %s, %s, now(), false)
+on conflict (conv_key) do update
+  set last_router_id = coalesce(excluded.last_router_id, continuity.last_router_id),
+      last_model_id = coalesce(excluded.last_model_id, continuity.last_model_id),
+      last_served_at = excluded.last_served_at,
+      last_ok = false`,
+		pooldb.S(j.ConvKey), pooldb.UUID(j.ServingRouterID), pooldb.S(j.CandidateModel))
+	if err := d.db.Exec(context.Background(), stmt); err != nil {
+		d.logf("dispatch: continuity fail-mark %s: %v", j.ConvKey, err)
 	}
 }
 
@@ -794,6 +1045,9 @@ func (d *Dispatcher) failJob(j *jobState, code, message string, pt, rt, tq, ts i
 	if j.Status == stFailed || j.Status == stDone {
 		return
 	}
+	// D-E4: a failed service invalidates the conversation's hint; run this
+	// while j.ServingRouterID is still set (cleared below).
+	d.upsertContinuityFailed(j)
 	j.Status = stFailed
 	j.CurrentCandidate = ""
 	j.ServingRouterID = ""
@@ -901,6 +1155,21 @@ func (d *Dispatcher) internalReject(op dispatchOp, errOut chan error) {
 		j.JobID, op.modelID, short(op.routerID), j.Bounces)
 	if j.Status == stOffered {
 		d.offerNext(j)
+	}
+}
+
+func (d *Dispatcher) contEvicted(op dispatchOp, errOut chan error) {
+	defer d.ack(errOut, nil)
+	marked := 0
+	for _, j := range d.jobs {
+		if j.Status != stPending || j.Cont == nil || j.Cont.routerID != op.routerID {
+			continue
+		}
+		j.contEvicted = true
+		marked++
+	}
+	if marked > 0 {
+		d.logf("dispatch: eviction marked on %d pending hint job(s) for %s", marked, short(op.routerID))
 	}
 }
 

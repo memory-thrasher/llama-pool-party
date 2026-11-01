@@ -10,12 +10,12 @@ func setEnv(t *testing.T) {
 	// Clear all four COORD_* vars at the START of each test so results are hermetic
 	// even when the environment already defines them (t.Setenv restores the
 	// original value on cleanup).
-	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL"} {
+	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS"} {
 		t.Setenv(k, "")
 	}
 	// Backstop: leave nothing behind even if a future change skips the loop above.
 	t.Cleanup(func() {
-		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL"} {
+		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS"} {
 			t.Setenv(k, "")
 		}
 	})
@@ -39,6 +39,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, DefaultLogLevel)
 	}
+	if cfg.ContIdleMS != DefaultContIdleMS {
+		t.Errorf("ContIdleMS = %d, want %d", cfg.ContIdleMS, DefaultContIdleMS)
+	}
+	if cfg.ContPreferMS != DefaultContPreferMS {
+		t.Errorf("ContPreferMS = %d, want %d", cfg.ContPreferMS, DefaultContPreferMS)
+	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() = nil with empty DSN, want error")
 	}
@@ -50,6 +56,8 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("COORD_DSN", "host=127.0.0.1 port=5432 user=postgres dbname=postgres")
 	t.Setenv("COORD_STATIC_DIR", "/srv/portal")
 	t.Setenv("COORD_LOG_LEVEL", "debug")
+	t.Setenv("POOL_CONT_IDLE_MS", "30000")
+	t.Setenv("POOL_CONT_PREFER_MS", "300000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -66,6 +74,12 @@ func TestEnvOverride(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want debug", cfg.LogLevel)
+	}
+	if cfg.ContIdleMS != 30000 {
+		t.Errorf("ContIdleMS = %d, want 30000", cfg.ContIdleMS)
+	}
+	if cfg.ContPreferMS != 300000 {
+		t.Errorf("ContPreferMS = %d, want 300000", cfg.ContPreferMS)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil", err)

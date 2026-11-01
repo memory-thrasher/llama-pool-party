@@ -226,11 +226,35 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 	}
 
 	// Continuity hint recorded on completion (D-E2): same conv key, served by frB.
-	rows, err = env.db.Query(ctx, fmt.Sprintf(
-		"select conv_key, last_router_id, last_ok from continuity where conv_key = %s", pooldb.S(convKey)))
+	if router, ok := waitContinuity(t, env, ctx, convKey, 15*time.Second); router != frB.ID() || ok != "t" {
+		t.Fatalf("continuity rows = (%s,%s), want (%s,t)", router, ok, frB.ID())
+	}
+
+	// Continuation after the cross-member service (D-E2): a second turn of the
+	// same conversation is again offered to frB (the last server), served by
+	// it, and leaves the continuity row last_ok=true.
+	body2 := []byte(`WS06-BODY-MARKER-2-` + strings.Repeat("w", 2048))
+	job2, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body2)
 	must(t, err)
-	if len(rows) != 1 || rows[0] != convKey+","+frB.ID()+",t" {
-		t.Fatalf("continuity rows = %v, want %s,%s,t", rows, convKey, frB.ID())
+	evB2, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if evB2.Type != poolproto.TypeWorkOffer {
+		t.Fatalf("continuation event type = %s, want work_offer", evB2.Type)
+	}
+	if of := offerOf(t, evB2); of.JobID != job2 {
+		t.Fatalf("continuation offer for job %s, want %s", of.JobID, job2)
+	}
+	must(t, frB.AcceptAndServe(ctx, job2, len(body2), convKey, ndjson))
+	waitRecord(t, env, ctx, job2, 15*time.Second)
+	outcome, reason := contRecord(t, env, ctx, job2)
+	if outcome != "skip" && outcome != "warm" {
+		t.Fatalf("continuation cont_outcome = %q, want skip or warm", outcome)
+	}
+	if reason != "" {
+		t.Fatalf("continuation cont_reason = %q, want null", reason)
+	}
+	if router, ok := waitContinuity(t, env, ctx, convKey, 15*time.Second); router != frB.ID() || ok != "t" {
+		t.Fatalf("continuity after continuation = (%s,%s), want (%s,t)", router, ok, frB.ID())
 	}
 
 	// Body staged on disk, purged on terminal (D-I2).

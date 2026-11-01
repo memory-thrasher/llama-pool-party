@@ -107,6 +107,8 @@ create table if not exists records (
     ok              boolean,
     error_code      text,
     stop_reason      text,
+    cont_outcome      text,   -- D-E6: 'skip'|'warm'|'cold'|'denied'; null = not a continuation
+    cont_reason      text,   -- D-E6: 'idle'|'gone'|'error'|'evicted'; null = hint honored
     created_at        timestamptz not null default now()
 );
 comment on table records is 'Per-request telemetry; NO body columns, ever (D-I1).';
@@ -146,6 +148,13 @@ create table if not exists queue_jobs (
 -- response push (an offered-but-unaccepted router must not read the body or
 -- push a response). Existing databases: add the column idempotently.
 alter table queue_jobs add column if not exists accepted_at timestamptz;
+
+-- v1 amendment (pre-release, WS-08): continuation outcome metrics (D-E6).
+-- Existing databases: add the columns idempotently.
+alter table records add column if not exists cont_outcome text;
+alter table records add column if not exists cont_reason text;
+comment on column records.cont_outcome is 'D-E6 continuation outcome: skip/warm/cold/denied; null = not a continuation.';
+comment on column records.cont_reason is 'D-E6 denial reason: idle/gone/error/evicted; null = hint honored.';
 comment on table queue_jobs is 'Coordinator-owned job queue; fairness selection (WS-11) scans here.';
 create index if not exists queue_jobs_status_idx on queue_jobs (priority, status, created_at);
 
@@ -160,7 +169,7 @@ create table if not exists continuity (
     last_router_id  uuid,
     last_model_id    text,
     last_served_at timestamptz not null default now(),
-    last_ok        boolean not null default false,
+    last_ok        boolean not null default false,   -- D-E4: false = last service failed, hint invalid
     idle_hint_ms    int
 );
 comment on table continuity is 'Continuity/affinity tracking for soft pin and skip-the-line (D-E2/D-E3).';

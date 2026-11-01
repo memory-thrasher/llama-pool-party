@@ -243,6 +243,20 @@ func (fr *FakeRouter) NextEvent(ctx context.Context, timeout time.Duration) (poo
 // header, then stages the body (PUT /pool/jobs/{id}/body). Returns
 // the coordinator-assigned job id.
 func (fr *FakeRouter) Intake(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string, body []byte) (string, error) {
+	jobID, err := fr.IntakeNoBody(ctx, reqID, tag, estPrompt, estCtx, convKey)
+	if err != nil {
+		return "", err
+	}
+	if err := fr.StageBody(ctx, jobID, body); err != nil {
+		return "", err
+	}
+	return jobID, nil
+}
+
+// IntakeNoBody posts only the metadata intake (POST /pool/jobs); the body is
+// never staged, so the job is not offerable (dispatch body gate) until
+// StageBody is called. Test hook for queue-ordering tests.
+func (fr *FakeRouter) IntakeNoBody(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string) (string, error) {
 	ji := poolproto.JobIntake{
 		RequestID:      reqID,
 		Tag:            tag,
@@ -274,27 +288,59 @@ func (fr *FakeRouter) Intake(ctx context.Context, reqID, tag string, estPrompt, 
 	if bodyResp.JobID == "" {
 		return "", fmt.Errorf("intake: empty job id: status %d: %s", resp.StatusCode, truncate(raw, 200))
 	}
-	jobID := bodyResp.JobID
+	return bodyResp.JobID, nil
+}
 
-	// Stage the body.
+// StageBody PUTs the job body (D-D2: the coordinator treats the job as
+// queued when the body PUT completes).
+func (fr *FakeRouter) StageBody(ctx context.Context, jobID string, body []byte) error {
 	breq, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		fmt.Sprintf("%s/pool/jobs/%s/body", fr.baseURL, jobID), bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return err
 	}
 	breq.Header.Set("Content-Type", "application/octet-stream")
 	breq.Header.Set("Authorization", "Bearer "+fr.token)
 	breq.Header.Set("X-Pool-Router-Id", fr.id)
 	bresp, err := fr.client.Do(breq)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer bresp.Body.Close()
 	if bresp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(bresp.Body)
-		return "", fmt.Errorf("stage body: status %d: %s", bresp.StatusCode, truncate(b, 200))
+		return fmt.Errorf("stage body: status %d: %s", bresp.StatusCode, truncate(b, 200))
 	}
-	return jobID, nil
+	return nil
+}
+
+// SetBusy updates the local busy_slots of the first loaded model, so the
+// fake's local view matches the coordinator's after a PostCapacity.
+func (fr *FakeRouter) SetBusy(busySlots int) {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	for i, m := range fr.models {
+		if m.Status == poolproto.ModelLoaded {
+			fr.models[i].BusySlots = busySlots
+			break
+		}
+	}
+}
+
+// PostError posts an error report (catalog 3.8): stage pre_token hops to the
+// next candidate (D-G1); mid_stream fails the job.
+func (fr *FakeRouter) PostError(ctx context.Context, jobID, stage, code, message string) error {
+	return fr.postEvent(ctx, poolproto.TypeError, &poolproto.ErrorReport{
+		JobID: jobID, OK: false, Stage: stage, Code: code, Message: message,
+	})
+}
+
+// PostCapacity reports a capacity change (catalog 3.2): the coordinator
+// replaces the router's model list (e.g. a slot freed, a model unloaded).
+func (fr *FakeRouter) PostCapacity(ctx context.Context, models []poolproto.ModelEntry) error {
+	return fr.postEvent(ctx, poolproto.TypeCapacity, &poolproto.Capacity{
+		RouterID: fr.id, Models: models, UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // OpenResponseGet opens the client-held GET /pool/jobs/{id}/response and
