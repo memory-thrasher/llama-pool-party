@@ -297,13 +297,18 @@ func (s *Server) handlePutResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// e2e fix: the final response goes out only after the pushed body has been
+	// fully received. The serving router's http client (cpp-httplib) adds
+	// "Expect: 100-continue" to every request body of >= 1024 bytes, and if
+	// the server's first reply is a final status instead of "100 Continue" it
+	// withholds the body (waiting for a response body that never ends) while
+	// the coordinator waits for the request body: a deadlock until the router's
+	// read timeout, observed as "push read error: unexpected EOF" + "(no
+	// response)". Reading the body first makes the server emit 100-continue and
+	// the lines still relay to the origin as they arrive.
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Connection", "close")
-	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	if flusher != nil {
-		flusher.Flush()
-	}
 	pipe := s.getPipe(jobID)
 	count := 0
 	scanner := newLineScanner(r.Body)
@@ -322,6 +327,10 @@ func (s *Server) handlePutResponse(w http.ResponseWriter, r *http.Request) {
 	if err := scanner.Err(); err != nil {
 		s.logf("relay: job %s push read error: %v", jobID, err)
 		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if flusher != nil {
+		flusher.Flush()
 	}
 	// The push ended: terminal for the origin's stream.
 	pipe.close()
