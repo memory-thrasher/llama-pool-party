@@ -16,8 +16,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +78,10 @@ type FakeRouter struct {
 
 	// events is the router's event stream (from the subscribe SSE).
 	events chan poolproto.Event
+
+	// the subscribe link, so Disconnect can drop it (a silent disconnect)
+	subCancel context.CancelFunc
+	subBody   io.ReadCloser
 
 	closed bool
 }
@@ -160,8 +166,10 @@ func (fr *FakeRouter) Connect(ctx context.Context) error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fr.baseURL+"/pool/subscribe", nil)
+	subCtx, subCancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(subCtx, http.MethodGet, fr.baseURL+"/pool/subscribe", nil)
 	if err != nil {
+		subCancel()
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
@@ -169,18 +177,38 @@ func (fr *FakeRouter) Connect(ctx context.Context) error {
 	req.Header.Set("X-Pool-Router-Id", fr.id)
 	resp, err := fr.client.Do(req)
 	if err != nil {
+		subCancel()
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		subCancel()
 		return fmt.Errorf("subscribe: status %d", resp.StatusCode)
 	}
 
 	fr.mu.Lock()
 	fr.closed = false
+	fr.subCancel = subCancel
+	fr.subBody = resp.Body
 	fr.mu.Unlock()
-	go fr.readEvents(resp.Body, ctx)
+	go fr.readEvents(resp.Body, subCtx)
 	return nil
+}
+
+// Disconnect drops the subscribe link: the router goes away silently (no
+// eviction event), so the coordinator stops counting it as connected while
+// its router_models rows stay. Test hook for the parked-member scenarios.
+func (fr *FakeRouter) Disconnect() {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.subCancel != nil {
+		fr.subCancel()
+		fr.subCancel = nil
+	}
+	if fr.subBody != nil {
+		fr.subBody.Close()
+		fr.subBody = nil
+	}
 }
 
 // postEvent posts a typed event envelope to POST /pool/events.
@@ -461,6 +489,154 @@ func (fr *FakeRouter) AcceptAndServe(ctx context.Context, jobID string, bodyByte
 		StopReason:   strPtr("finish_reason"),
 		ServedBy:    fr.id,
 	})
+}
+
+// AcceptAndDieMidPush runs the serving flow through the body pull (the job
+// is running now), pushes only a few lines, then drops the connection hard
+// (RST) mid-push: the serving router dies with the job still running (the
+// M1 scenario the running cap must cover).
+func (fr *FakeRouter) AcceptAndDieMidPush(ctx context.Context, jobID string, bodyBytes int, convKey string, lines []string) error {
+	modelID, nCtx, err := fr.currentModel(jobID)
+	if err != nil {
+		return err
+	}
+	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
+	}); err != nil {
+		return fmt.Errorf("offer_accept: %w", err)
+	}
+	fr.pullBody(ctx, jobID)
+
+	// raw socket: advertise the full body, deliver only the first line, wait
+	// for the coordinator to relay it and block on the next read, then RST on
+	// close: the push read errors mid-body (a real mid-push drop) and the
+	// relay pipe stays open until the running cap fails the job.
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(fr.baseURL, "http://"))
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, portStr), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	first := lines[0] + "\n"
+	rest := ""
+	if len(lines) > 1 {
+		rest = strings.Join(lines[1:], "\n") + "\n"
+	}
+	full := first + rest
+	fmt.Fprintf(conn, "PUT /pool/jobs/%s/response HTTP/1.1\r\n", jobID)
+	fmt.Fprintf(conn, "Host: %s:%d\r\n", host, port)
+	if _, err := conn.Write([]byte("Authorization: Bearer " + fr.token + "\r\n")); err != nil {
+		conn.Close()
+		return err
+	}
+	if _, err := conn.Write([]byte("X-Pool-Router-Id: " + fr.id + "\r\n")); err != nil {
+		conn.Close()
+		return err
+	}
+	if _, err := conn.Write([]byte("Content-Type: application/x-ndjson\r\n")); err != nil {
+		conn.Close()
+		return err
+	}
+	fmt.Fprintf(conn, "Content-Length: %d\r\n\r\n", len(full))
+	if _, err := conn.Write([]byte(first)); err != nil {
+		conn.Close()
+		return err
+	}
+	time.Sleep(500 * time.Millisecond) // the coordinator relays the line and blocks on the next read
+	type lingerer interface{ SetLinger(int) error }
+	if l, ok := conn.(lingerer); ok {
+		_ = l.SetLinger(0) // RST on close, not a clean FIN
+	}
+	conn.Close()
+	return nil
+}
+
+// AcceptAndError accepts the offer and then posts the error without serving:
+// a pre_token bounce (D-G1) or a scripted failure, driven by the test.
+func (fr *FakeRouter) AcceptAndError(ctx context.Context, jobID, stage, code, message string) error {
+	modelID, nCtx, err := fr.currentModel(jobID)
+	if err != nil {
+		return err
+	}
+	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
+	}); err != nil {
+		return fmt.Errorf("offer_accept: %w", err)
+	}
+	return fr.postEvent(ctx, poolproto.TypeError, &poolproto.ErrorReport{
+		JobID: jobID, OK: false, Stage: stage, Code: code, Message: message,
+	})
+}
+
+// pacedReader emits one line per Read with a fixed gap: the PUT body
+// trickles so a test can act (close the origin) while the push is in flight.
+type pacedReader struct {
+	lines []string
+	gap   time.Duration
+	i     int
+}
+
+func (r *pacedReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.lines) {
+		return 0, io.EOF
+	}
+	if r.gap > 0 {
+		time.Sleep(r.gap)
+	}
+	line := r.lines[r.i] + "\n"
+	r.i++
+	return copy(p, []byte(line)), nil
+}
+
+// AcceptAndServePaced runs the serving flow with a paced push (gap between
+// lines). It posts no completion: the test drives the outcome (the origin
+// going away mid-push aborts the PUT). status != 200 or err report the
+// abort.
+func (fr *FakeRouter) AcceptAndServePaced(ctx context.Context, jobID string, bodyBytes int, convKey string, lines []string, gap time.Duration) (int, error) {
+	modelID, nCtx, err := fr.currentModel(jobID)
+	if err != nil {
+		return 0, err
+	}
+	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
+	}); err != nil {
+		return 0, fmt.Errorf("offer_accept: %w", err)
+	}
+	fr.pullBody(ctx, jobID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		fmt.Sprintf("%s/pool/jobs/%s/response", fr.baseURL, jobID), &pacedReader{lines: lines, gap: gap})
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.Header.Set("Authorization", "Bearer "+fr.token)
+	req.Header.Set("X-Pool-Router-Id", fr.id)
+	resp, err := fr.client.Do(req)
+	if err != nil {
+		return 0, err // the push aborted: the coordinator closed the stream
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, fmt.Errorf("push aborted: status %d", resp.StatusCode)
+	}
+	return http.StatusOK, nil
 }
 
 // AcceptAndHold accepts the offer and pulls the body but streams no response

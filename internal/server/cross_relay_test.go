@@ -16,12 +16,16 @@ import (
 // to the origin. Guards the response-push reply ordering (see handlePutResponse).
 func TestCrossRelay_BigResponse(t *testing.T) {
 	env := newE2E(t)
+	// frA: free slot in the coordinator's view but scripted to reject with
+	// no_slot (the D-D3 race). Largest ctx -> offered first; its rejection
+	// reason is asserted (review M2).
 	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
-	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 1, poolproto.ModelLoaded)
-	frA.SetPolicy(RejectPolicy{Reason: "no_slot"})
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 131072, 1, 0, poolproto.ModelLoaded)
+	cr := &countingReject{}
+	frA.SetPolicy(cr)
 	must(t, frA.Connect(context.Background()))
 	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
-	frB.LoadModel("md-b", []string{"pool-text-md"}, 131072, 2, 0, poolproto.ModelLoaded)
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 32768, 2, 0, poolproto.ModelLoaded)
 	frB.SetPolicy(AcceptPolicy{})
 	must(t, frB.Connect(context.Background()))
 	ctx := context.Background()
@@ -31,6 +35,27 @@ func TestCrossRelay_BigResponse(t *testing.T) {
 	must(t, err)
 	rgA, err := frA.OpenResponseGet(ctx, jobID)
 	must(t, err)
+
+	// frA is offered first and its installed policy rejects no_slot.
+	evA, err := frA.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evA); of.JobID != jobID {
+		t.Fatalf("fr-a offer for job %s, want %s", of.JobID, jobID)
+	}
+	must(t, frA.DecideAndRespond(ctx, offerOf(t, evA), len(body), convKey, nil))
+	// the rejection event reached the coordinator carrying reason no_slot
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(env.logs.String(), "offer_reject") || !strings.Contains(env.logs.String(), "(no_slot)") {
+		select {
+		case <-deadline:
+			t.Fatalf("fr-a rejection reason not recorded: %s", truncate([]byte(env.logs.String()), 2000))
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if cr.calls != 1 {
+		t.Fatalf("fr-a decide calls = %d, want 1", cr.calls)
+	}
+
 	evB, err := frB.NextEvent(ctx, 15*time.Second)
 	must(t, err)
 	if of := offerOf(t, evB); of.JobID != jobID {

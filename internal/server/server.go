@@ -67,7 +67,8 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 		return err == nil
 	}
 	opts := dispatch.Opts{MaxBounces: cfg.MaxBounces, LeaseDefaultMS: cfg.OfferLeaseMS,
-		ContIdleMS: cfg.ContIdleMS, ContPreferMS: cfg.ContPreferMS, BodyReady: bodyReady}
+		ContIdleMS: cfg.ContIdleMS, ContPreferMS: cfg.ContPreferMS,
+		JobExpiryMS: cfg.JobExpiryMS, RunningCapMS: cfg.RunningCapMS, BodyReady: bodyReady}
 	s.disp = dispatch.New(db, s, opts, s.purgeBody)
 	return s
 }

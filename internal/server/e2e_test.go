@@ -38,7 +38,18 @@ type e2eEnv struct {
 	drop    func()
 }
 
+// e2eOpts tunes the test coordinator (zero = the config defaults).
+type e2eOpts struct {
+	contIdleMS   int
+	jobExpiryMS  int
+	runningCapMS int
+}
+
 func newE2E(t *testing.T) *e2eEnv {
+	return newE2EWith(t, e2eOpts{})
+}
+
+func newE2EWith(t *testing.T, opts e2eOpts) *e2eEnv {
 	t.Helper()
 	ctx := context.Background()
 	pgDSN := os.Getenv("PGDSN")
@@ -66,7 +77,8 @@ func newE2E(t *testing.T) *e2eEnv {
 
 	dataDir := t.TempDir()
 	logs := &bytes.Buffer{}
-	cfg := config.Config{Addr: "127.0.0.1:0", DSN: baseDSN, DataDir: dataDir, LogLevel: "info"}
+	cfg := config.Config{Addr: "127.0.0.1:0", DSN: baseDSN, DataDir: dataDir, LogLevel: "info",
+		ContIdleMS: opts.contIdleMS, JobExpiryMS: opts.jobExpiryMS, RunningCapMS: opts.runningCapMS}
 	srv := New(cfg, db, dataDir, logs)
 	srv.Dispatcher().SetLogger(srv.logf)
 	srv.Dispatcher().Start(context.Background())
@@ -246,9 +258,11 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 	}
 	must(t, frB.AcceptAndServe(ctx, job2, len(body2), convKey, ndjson))
 	waitRecord(t, env, ctx, job2, 15*time.Second)
+	// Deterministic: the continuation is warm (skip priority) and the hinted
+	// router frB is the only candidate and serves, so 'skip' stands.
 	outcome, reason := contRecord(t, env, ctx, job2)
-	if outcome != "skip" && outcome != "warm" {
-		t.Fatalf("continuation cont_outcome = %q, want skip or warm", outcome)
+	if outcome != "skip" {
+		t.Fatalf("continuation cont_outcome = %q, want skip", outcome)
 	}
 	if reason != "" {
 		t.Fatalf("continuation cont_reason = %q, want null", reason)

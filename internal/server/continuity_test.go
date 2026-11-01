@@ -205,9 +205,11 @@ func TestE2E_Continuity_SkipTheLine(t *testing.T) {
 	must(t, frA.AcceptAndServe(ctx, contJobID, len(body), convKey, ndjson))
 	waitRecord(t, env, ctx, contJobID, 15*time.Second)
 
+	// Deterministic: warm hint + skip priority; frA is the only candidate and
+	// it serves, so 'skip' stands.
 	outcome, reason := contRecord(t, env, ctx, contJobID)
-	if outcome != "skip" && outcome != "warm" {
-		t.Fatalf("cont_outcome = %q, want skip or warm", outcome)
+	if outcome != "skip" {
+		t.Fatalf("cont_outcome = %q, want skip", outcome)
 	}
 	if reason != "" {
 		t.Fatalf("cont_reason = %q, want null", reason)
@@ -295,9 +297,11 @@ where conv_key = %s`, config.DefaultContIdleMS+1000, pooldb.S(convKey))))
 	must(t, frB.AcceptAndServe(ctx, contJobID, len(body), convKey, ndjson))
 	waitRecord(t, env, ctx, contJobID, 15*time.Second)
 
+	// Deterministic: the hint was honored first (source pin) but bounced; frB
+	// serves, so the outcome finalizes 'cold' with the 'idle' reason.
 	outcome, reason := contRecord(t, env, ctx, contJobID)
-	if outcome != "denied" && outcome != "cold" {
-		t.Fatalf("cont_outcome = %q, want denied or cold", outcome)
+	if outcome != "cold" {
+		t.Fatalf("cont_outcome = %q, want cold", outcome)
 	}
 	if reason != "idle" {
 		t.Fatalf("cont_reason = %q, want idle", reason)
@@ -437,5 +441,222 @@ func TestE2E_Continuity_GoneRouter(t *testing.T) {
 	must(t, err)
 	if st != "done" {
 		t.Fatalf("continuation status = %q, want done", st)
+	}
+}
+
+// TestE2E_Continuity_SkipDowngrade: the warm continuation gets skip priority
+// and the hinted router is offered first, but it bounces (no_slot) and
+// another member serves: the skip was attempted, the cache did not pay off,
+// so the outcome finalizes 'cold' (WS-09 Part C.1).
+func TestE2E_Continuity_SkipDowngrade(t *testing.T) {
+	env := newE2E(t)
+
+	// frA: largest ctx (serves turn 1, the hint), scripted to reject the
+	// continuation. frB: accepts all.
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 131072, 1, 0, poolproto.ModelLoaded)
+	sA := newScriptedAccept()
+	frA.SetPolicy(sA)
+	must(t, frA.Connect(context.Background()))
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	frB.SetPolicy(AcceptPolicy{})
+	must(t, frB.Connect(context.Background()))
+
+	ctx := context.Background()
+	convKey := hexToken(32)
+	ndjson := []string{`{"choices":[{"delta":{"content":"ws09"}}]}`, "data: [DONE]"}
+	body := []byte(`WS09-BODY-` + strings.Repeat("s", 2048))
+
+	// Turn 1: served by frA -> the hint.
+	job1, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	sA.Allow(job1)
+	of := nextOffer(t, frA, ctx, 15*time.Second)
+	if of.JobID != job1 {
+		t.Fatalf("turn-1 offer for job %s, want %s", of.JobID, job1)
+	}
+	must(t, frA.AcceptAndServe(ctx, job1, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, job1, 15*time.Second)
+	waitContinuity(t, env, ctx, convKey, 15*time.Second)
+
+	// The continuation: warm -> skip priority, frA offered first; frA
+	// bounces no_slot, frB serves.
+	contJobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	of = nextOffer(t, frA, ctx, 15*time.Second)
+	if of.JobID != contJobID {
+		t.Fatalf("continuation offer for job %s, want %s", of.JobID, contJobID)
+	}
+	if of.Source != poolproto.SourceSkip {
+		t.Fatalf("offer source = %q, want skip", of.Source)
+	}
+	must(t, frA.DecideAndRespond(ctx, of, len(body), convKey, nil)) // scripted no_slot
+	evB, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evB); of.JobID != contJobID {
+		t.Fatalf("bounce offer for job %s, want %s", of.JobID, contJobID)
+	}
+	must(t, frB.AcceptAndServe(ctx, contJobID, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, contJobID, 15*time.Second)
+
+	// The hinted router bounced and frB served: the cache did not pay off.
+	outcome, reason := contRecord(t, env, ctx, contJobID)
+	if outcome != "cold" {
+		t.Fatalf("cont_outcome = %q, want cold (the hinted router bounced)", outcome)
+	}
+	if reason != "" {
+		t.Fatalf("cont_reason = %q, want null", reason)
+	}
+	router, err := env.db.FirstString(ctx,
+		"select router_id::text from records where job_id = "+pooldb.UUID(contJobID))
+	must(t, err)
+	if router != frB.ID() {
+		t.Fatalf("served by %s, want %s", router, frB.ID())
+	}
+}
+
+// TestE2E_Continuity_PreOfferExpiry: the hinted router is parked (silent
+// disconnect) so the continuation can never be offered; the job expires
+// before its first offer. The attempt still counts: 'denied' with reason
+// 'idle' - the tiny skip window (1s in this test) had passed by terminal
+// time (WS-09 Part C.2; precedence idle > gone > error).
+func TestE2E_Continuity_PreOfferExpiry(t *testing.T) {
+	env := newE2EWith(t, e2eOpts{contIdleMS: 1000, jobExpiryMS: 5000})
+
+	// frA: the only member; parked after turn 1.
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 131072, 1, 0, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+
+	ctx := context.Background()
+	convKey := hexToken(32)
+	ndjson := []string{`{"choices":[{"delta":{"content":"ws09"}}]}`, "data: [DONE]"}
+	body := []byte(`WS09-BODY-` + strings.Repeat("p", 2048))
+
+	// Turn 1: served by frA -> the hint.
+	job1, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	of := nextOffer(t, frA, ctx, 15*time.Second)
+	if of.JobID != job1 {
+		t.Fatalf("turn-1 offer for job %s, want %s", of.JobID, job1)
+	}
+	must(t, frA.AcceptAndServe(ctx, job1, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, job1, 15*time.Second)
+	waitContinuity(t, env, ctx, convKey, 15*time.Second)
+
+	// Park frA (silent disconnect) and intake the continuation: it can never
+	// be offered and expires (5s cap in this test).
+	frA.Disconnect()
+	job2, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+
+	waitRecord(t, env, ctx, job2, 30*time.Second)
+	rows, err := env.db.Query(ctx, fmt.Sprintf(
+		"select ok, coalesce(cont_outcome, ''), coalesce(cont_reason, '') from records where job_id = %s",
+		pooldb.UUID(job2)))
+	must(t, err)
+	if len(rows) != 1 {
+		t.Fatalf("records rows = %d, want 1", len(rows))
+	}
+	f := strings.Split(rows[0], ",")
+	if f[0] != "f" {
+		t.Fatalf("records row = %s, want a failed job", rows[0])
+	}
+	if f[1] != "denied" || f[2] != "idle" {
+		t.Fatalf("(cont_outcome,cont_reason) = (%q,%q), want (denied,idle)", f[1], f[2])
+	}
+	st, err := env.db.FirstString(ctx, "select status from queue_jobs where id = "+pooldb.UUID(job2))
+	must(t, err)
+	if st != "failed" {
+		t.Fatalf("status = %q, want failed", st)
+	}
+}
+
+// TestE2E_Continuity_PreTokenNoPoison: a pre_token bounce (never terminal on
+// its own) must not poison the hint: last_ok stays true from the prior clean
+// service, so the next same-conversation job still gets its hint (WS-09 Part
+// C.3). Turn 1: frA clean. Turn 2: frA bounces pre_token, frB serves. Turn
+// 3: offered to frB (the hint) with skip source - had the pre_token bounce
+// failed the hint, it would be denied and not fronted.
+func TestE2E_Continuity_PreTokenNoPoison(t *testing.T) {
+	env := newE2E(t)
+
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 131072, 1, 0, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	frB.SetPolicy(AcceptPolicy{})
+	must(t, frB.Connect(context.Background()))
+
+	ctx := context.Background()
+	convKey := hexToken(32)
+	ndjson := []string{`{"choices":[{"delta":{"content":"ws09"}}]}`, "data: [DONE]"}
+	body := []byte(`WS09-BODY-` + strings.Repeat("n", 2048))
+
+	// Turn 1: served cleanly by frA.
+	job1, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	of := nextOffer(t, frA, ctx, 15*time.Second)
+	if of.JobID != job1 {
+		t.Fatalf("turn-1 offer for job %s, want %s", of.JobID, job1)
+	}
+	must(t, frA.AcceptAndServe(ctx, job1, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, job1, 15*time.Second)
+	if router, ok := waitContinuity(t, env, ctx, convKey, 15*time.Second); router != frA.ID() || ok != "t" {
+		t.Fatalf("continuity after turn 1 = (%s,%s), want (%s,t)", router, ok, frA.ID())
+	}
+
+	// Turn 2: frA (the hint) bounces pre_token; frB serves.
+	job2, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	of = nextOffer(t, frA, ctx, 15*time.Second)
+	if of.JobID != job2 {
+		t.Fatalf("turn-2 offer for job %s, want %s", of.JobID, job2)
+	}
+	if of.Source != poolproto.SourceSkip {
+		t.Fatalf("turn-2 offer source = %q, want skip", of.Source)
+	}
+	must(t, frA.AcceptAndError(ctx, job2, poolproto.StagePreToken, poolproto.ErrorOther,
+		"fake pre-token bounce"))
+	evB, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evB); of.JobID != job2 {
+		t.Fatalf("turn-2 bounce offer for job %s, want %s", of.JobID, job2)
+	}
+	must(t, frB.AcceptAndServe(ctx, job2, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, job2, 15*time.Second)
+	// The bounce writes its own failed records row; the final row is the
+	// completion. The hinted router bounced and frB served: 'cold'.
+	rows, err := env.db.Query(ctx, fmt.Sprintf(
+		"select cont_outcome from records where job_id = %s and ok = true", pooldb.UUID(job2)))
+	must(t, err)
+	if len(rows) != 1 {
+		t.Fatalf("completion rows = %d, want 1", len(rows))
+	}
+	if rows[0] != "cold" {
+		t.Fatalf("turn-2 cont_outcome = %q, want cold", rows[0])
+	}
+
+	// Turn 3: the hint is alive (not poisoned by the pre_token bounce) and
+	// points at frB now: frB is offered first, with skip source.
+	job3, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, &convKey, body)
+	must(t, err)
+	ev3, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, ev3); of.JobID != job3 {
+		t.Fatalf("turn-3 first offer for job %s, want %s", of.JobID, job3)
+	}
+	if of.Source != poolproto.SourceSkip {
+		t.Fatalf("turn-3 offer source = %q, want skip (the pre_token bounce must not poison the hint)",
+			of.Source)
+	}
+	must(t, frB.AcceptAndServe(ctx, job3, len(body), convKey, ndjson))
+	waitRecord(t, env, ctx, job3, 15*time.Second)
+	if router, ok := waitContinuity(t, env, ctx, convKey, 15*time.Second); router != frB.ID() || ok != "t" {
+		t.Fatalf("continuity after turn 3 = (%s,%s), want (%s,t)", router, ok, frB.ID())
 	}
 }

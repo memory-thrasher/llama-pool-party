@@ -10,12 +10,12 @@ func setEnv(t *testing.T) {
 	// Clear all four COORD_* vars at the START of each test so results are hermetic
 	// even when the environment already defines them (t.Setenv restores the
 	// original value on cleanup).
-	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS"} {
+	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS", "POOL_JOB_EXPIRY_MS", "POOL_RUNNING_CAP_MS"} {
 		t.Setenv(k, "")
 	}
 	// Backstop: leave nothing behind even if a future change skips the loop above.
 	t.Cleanup(func() {
-		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS"} {
+		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS", "POOL_JOB_EXPIRY_MS", "POOL_RUNNING_CAP_MS"} {
 			t.Setenv(k, "")
 		}
 	})
@@ -45,6 +45,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.ContPreferMS != DefaultContPreferMS {
 		t.Errorf("ContPreferMS = %d, want %d", cfg.ContPreferMS, DefaultContPreferMS)
 	}
+	if cfg.JobExpiryMS != DefaultJobExpiryMS {
+		t.Errorf("JobExpiryMS = %d, want %d", cfg.JobExpiryMS, DefaultJobExpiryMS)
+	}
+	if cfg.RunningCapMS != DefaultRunningCapMS {
+		t.Errorf("RunningCapMS = %d, want %d", cfg.RunningCapMS, DefaultRunningCapMS)
+	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() = nil with empty DSN, want error")
 	}
@@ -58,6 +64,8 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("COORD_LOG_LEVEL", "debug")
 	t.Setenv("POOL_CONT_IDLE_MS", "30000")
 	t.Setenv("POOL_CONT_PREFER_MS", "300000")
+	t.Setenv("POOL_JOB_EXPIRY_MS", "60000")
+	t.Setenv("POOL_RUNNING_CAP_MS", "45000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -80,6 +88,12 @@ func TestEnvOverride(t *testing.T) {
 	}
 	if cfg.ContPreferMS != 300000 {
 		t.Errorf("ContPreferMS = %d, want 300000", cfg.ContPreferMS)
+	}
+	if cfg.JobExpiryMS != 60000 {
+		t.Errorf("JobExpiryMS = %d, want 60000", cfg.JobExpiryMS)
+	}
+	if cfg.RunningCapMS != 45000 {
+		t.Errorf("RunningCapMS = %d, want 45000", cfg.RunningCapMS)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil", err)

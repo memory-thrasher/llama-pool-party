@@ -36,6 +36,14 @@ const (
 	// D-E2/D-E3): beyond the skip window, up to this age, the hinted member is
 	// still offered first - no queue priority.
 	DefaultContPreferMS = 600000
+	// DefaultJobExpiryMS caps how long a queued (pending/offered) job may wait
+	// before it fails (POOL_JOB_EXPIRY_MS, D-D2 MVP).
+	DefaultJobExpiryMS = 1800000
+	// DefaultRunningCapMS caps how long a job may stay running (from the body
+	// pull) before it fails with a clean terminal error (POOL_RUNNING_CAP_MS,
+	// D-G2): a serving router that drops mid-push or streams forever must not
+	// leave the job non-terminal.
+	DefaultRunningCapMS = 300000
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -61,6 +69,10 @@ type Config struct {
 	// ContPreferMS is the soft-preference window, ms (POOL_CONT_PREFER_MS,
 	// D-E2/D-E3).
 	ContPreferMS int
+	// JobExpiryMS caps pending/offered jobs (POOL_JOB_EXPIRY_MS).
+	JobExpiryMS int
+	// RunningCapMS caps running jobs (POOL_RUNNING_CAP_MS, D-G2).
+	RunningCapMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -84,6 +96,8 @@ func Load() (Config, error) {
 		HeartbeatMS: atoi(env("POOL_HEARTBEAT_MS", ""), DefaultHeartbeatMS),
 		ContIdleMS:   atoi(env("POOL_CONT_IDLE_MS", ""), DefaultContIdleMS),
 		ContPreferMS: atoi(env("POOL_CONT_PREFER_MS", ""), DefaultContPreferMS),
+		JobExpiryMS:  atoi(env("POOL_JOB_EXPIRY_MS", ""), DefaultJobExpiryMS),
+		RunningCapMS: atoi(env("POOL_RUNNING_CAP_MS", ""), DefaultRunningCapMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)
