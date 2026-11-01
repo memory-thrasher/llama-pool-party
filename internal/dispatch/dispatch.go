@@ -75,6 +75,13 @@ type jobState struct {
 	CandidateModel string
 	ServingRouterID string
 
+	// passCands caches the candidate list for the current offer pass. It is
+	// captured once when the pass starts (CandidateIdx 0) and reused as the
+	// index advances on rejections, so the index stays meaningful even though
+	// per-router connectivity (and thus the live selectCandidates result)
+	// changes mid-pass. Reset to nil by parkJob to start a fresh pass.
+	passCands []candidate
+
 	BodyPulled bool
 	LeaseExpiresAt time.Time // zero = no lease armed
 	AcceptedAt time.Time // zero = offered but not accepted (gates body pull/response push)
@@ -126,6 +133,7 @@ type Dispatcher struct {
 	jobExpiry time.Duration
 	parkDelay time.Duration
 	purge Purger
+	bodyReady func(jobID string) bool // e2e fix: gates offerNext on the staged body
 
 	log func(format string, args ...any)
 
@@ -143,6 +151,10 @@ type Opts struct {
 	LeaseDefaultMS int
 	JobExpiry time.Duration // 0 = 30m
 	ParkDelay time.Duration // 0 = 5s
+	// e2e fix: BodyReady reports whether the origin has staged the job's body
+	// file. A job is only offerable once the body is staged (catalog: "the
+	// coordinator treats the job as *queued* when the body PUT completes").
+	BodyReady func(jobID string) bool
 }
 
 func (o Opts) withDefaults() Opts {
@@ -171,6 +183,7 @@ func New(db *pooldb.DB, hub RouterHub, opts Opts, purge Purger) *Dispatcher {
 		jobExpiry: opts.JobExpiry,
 		parkDelay: opts.ParkDelay,
 		purge: purge,
+		bodyReady: opts.BodyReady,
 		jobs: make(map[string]*jobState),
 		in: make(chan dispatchOp, 64),
 		stopChan: make(chan struct{}),
@@ -444,7 +457,25 @@ order by rm.router_id`, pooldb.S(j.Tag)))
 // Exhaustion parks the job (retry after the park delay); a class with no
 // members at all fails it with model_gone (D-C7).
 func (d *Dispatcher) offerNext(j *jobState) {
-	cands := d.selectCandidates(j)
+	// e2e fix: hold the offer until the origin's body PUT has landed. Without
+	// this gate the 1s sweep can offer (and get the offer accepted) before the
+	// body is staged; the PUT then 409s ("job no longer pending") and the
+	// acceptor's body pull 404s. The job stays pending and is re-picked on the
+	// next sweep tick.
+	if d.bodyReady != nil && !d.bodyReady(j.JobID) {
+		return
+	}
+	// e2e fix: cache the candidate list for the pass instead of re-selecting on
+	// every rejection. The list is ordered by context headroom then router name;
+	// re-selecting per rejection changes its size/order as routers' live
+	// connectivity fluctuates (a long-poll router disconnects each time it
+	// receives an offer), which left the index pointing past the end of a
+	// shorter list so the next member was silently skipped (cross-member
+	// never dispatched). Capturing once keeps the index stable for the pass.
+	if j.passCands == nil {
+		j.passCands = d.selectCandidates(j)
+	}
+	cands := j.passCands
 	for j.CandidateIdx < len(cands) {
 		c := cands[j.CandidateIdx]
 		j.CurrentCandidate = c.routerID
@@ -493,8 +524,9 @@ func (d *Dispatcher) parkJob(j *jobState, why string) {
 	j.AcceptedAt = time.Time{}
 	// A fresh offer pass starts from the first candidate; in-pass rejections
 	// are already counted in Bounces (review H1: a stale index wedged the job
-	// until expiry).
+	// until expiry). Drop the cached list so the next pass re-selects.
 	j.CandidateIdx = 0
+	j.passCands = nil
 	j.LeaseExpiresAt = time.Time{}
 	j.NextOfferAt = time.Now().Add(d.parkDelay)
 	d.persistStatus(j, stPending)

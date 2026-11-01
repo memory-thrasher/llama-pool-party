@@ -59,7 +59,14 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 		subs: make(map[string]*session),
 		pipes: make(map[string]*relayPipe),
 	}
-	opts := dispatch.Opts{MaxBounces: cfg.MaxBounces, LeaseDefaultMS: cfg.OfferLeaseMS}
+	// e2e fix: a job becomes offerable only once the origin has staged its body
+	// (catalog: "queued when the body PUT completes"). Without this the 1s sweep
+	// can offer the job before the body PUT lands, and the PUT then 409s.
+	bodyReady := func(jobID string) bool {
+		_, err := os.Stat(filepath.Join(dataDir, "jobs", jobID))
+		return err == nil
+	}
+	opts := dispatch.Opts{MaxBounces: cfg.MaxBounces, LeaseDefaultMS: cfg.OfferLeaseMS, BodyReady: bodyReady}
 	s.disp = dispatch.New(db, s, opts, s.purgeBody)
 	return s
 }
