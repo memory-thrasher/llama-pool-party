@@ -44,6 +44,17 @@ const (
 	// D-G2): a serving router that drops mid-push or streams forever must not
 	// leave the job non-terminal.
 	DefaultRunningCapMS = 300000
+	// DefaultFairWindowMS is the D-F2 fairness rolling window, ms
+	// (POOL_FAIR_WINDOW_MS): the served/consumed token sums cover this much
+	// recent history (default 7 days).
+	DefaultFairWindowMS = 604800000
+	// DefaultFairTopK is the D-F3 selection window (POOL_FAIR_TOPK): the
+	// fairness pick considers the k oldest eligible pending jobs.
+	DefaultFairTopK = 10
+	// DefaultParkBackoffMS is the base backoff between re-offers of a parked
+	// job (POOL_PARK_BACKOFF_MS); it doubles per consecutive park, capped at
+	// ~10x the base (~5s at the default) (DISP-RESIDUAL-1).
+	DefaultParkBackoffMS = 500
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -73,6 +84,14 @@ type Config struct {
 	JobExpiryMS int
 	// RunningCapMS caps running jobs (POOL_RUNNING_CAP_MS, D-G2).
 	RunningCapMS int
+	// FairWindowMS is the D-F2 fairness rolling window, ms (POOL_FAIR_WINDOW_MS).
+	FairWindowMS int
+	// FairTopK is the D-F3 selection window: k oldest pending jobs
+	// (POOL_FAIR_TOPK).
+	FairTopK int
+	// ParkBackoffMS is the base parked-job re-offer backoff, ms
+	// (POOL_PARK_BACKOFF_MS).
+	ParkBackoffMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -98,6 +117,9 @@ func Load() (Config, error) {
 		ContPreferMS: atoi(env("POOL_CONT_PREFER_MS", ""), DefaultContPreferMS),
 		JobExpiryMS:  atoi(env("POOL_JOB_EXPIRY_MS", ""), DefaultJobExpiryMS),
 		RunningCapMS: atoi(env("POOL_RUNNING_CAP_MS", ""), DefaultRunningCapMS),
+		FairWindowMS: atoi(env("POOL_FAIR_WINDOW_MS", ""), DefaultFairWindowMS),
+		FairTopK:     atoi(env("POOL_FAIR_TOPK", ""), DefaultFairTopK),
+		ParkBackoffMS: atoi(env("POOL_PARK_BACKOFF_MS", ""), DefaultParkBackoffMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)

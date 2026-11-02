@@ -80,11 +80,98 @@ func TestPickFair_WarmHint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := pickFair(tc.jobs, now, tc.warm)
+			got := pickFair(tc.jobs, now, tc.warm, 10, func([]string) map[string]float64 { return map[string]float64{} })
 			if (got == nil) != (tc.want == "") {
 				t.Fatalf("pickFair = %v, want %q", got, tc.want)
 			}
 			if got != nil && got.JobID != tc.want {
+				t.Fatalf("pickFair = %q, want %q", got.JobID, tc.want)
+			}
+		})
+	}
+}
+
+// TestPickFair_Fairness pins the D-F2/D-F3 non-warm pick: among the k oldest
+// eligible jobs the highest-ratio user is served, at their oldest job in the
+// window; a ratio 1.0 tie serves the oldest job (per-user FIFO).
+func TestPickFair_Fairness(t *testing.T) {
+	now := time.Now()
+	mk := func(id, user string, created time.Time) *jobState {
+		return &jobState{JobID: id, UserID: user, Status: stPending, CreatedAt: created}
+	}
+	cases := []struct {
+		name   string
+		jobs   map[string]*jobState
+		topK   int
+		ratios map[string]float64
+		want   string
+	}{
+		{
+			name: "ratio 1.0 tie -> oldest job first",
+			jobs: map[string]*jobState{
+				"a": mk("a", "uA", now.Add(-3*time.Second)),
+				"b": mk("b", "uB", now.Add(-1*time.Second)),
+			},
+			ratios: map[string]float64{"uA": 1.0, "uB": 1.0},
+			want:   "a",
+		},
+		{
+			name: "higher ratio user beats the older job",
+			jobs: map[string]*jobState{
+				"old": mk("old", "uLow", now.Add(-3*time.Second)),
+				"new": mk("new", "uHigh", now.Add(-1*time.Second)),
+			},
+			ratios: map[string]float64{"uLow": 0.001, "uHigh": 100},
+			want:   "new",
+		},
+		{
+			name: "per-user FIFO: the user's oldest job is served",
+			jobs: map[string]*jobState{
+				"old": mk("old", "u", now.Add(-3*time.Second)),
+				"new": mk("new", "u", now.Add(-1*time.Second)),
+			},
+			ratios: map[string]float64{},
+			want:   "old",
+		},
+		{
+			name: "top-k window: users outside the window are not picked",
+			jobs: map[string]*jobState{
+				"heaviest": mk("heaviest", "uH", now.Add(-5*time.Second)),
+				"b":        mk("b", "uB", now.Add(-3*time.Second)),
+				"c":        mk("c", "uC", now.Add(-1*time.Second)),
+			},
+			topK:   2,
+			ratios: map[string]float64{"uH": 0.001, "uB": 1.0, "uC": 1.0},
+			want:   "b",
+		},
+		{
+			name: "parked jobs are not eligible in the window",
+			jobs: map[string]*jobState{
+				"parked": {JobID: "parked", UserID: "uH", Status: stPending, CreatedAt: now.Add(-5 * time.Second), NextOfferAt: now.Add(time.Second)},
+				"b":      mk("b", "uB", now.Add(-3*time.Second)),
+				"c":      mk("c", "uC", now.Add(-1*time.Second)),
+			},
+			topK:   2,
+			ratios: map[string]float64{},
+			want:   "b",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ratios := tc.ratios
+			if ratios == nil {
+				ratios = map[string]float64{}
+			}
+			topK := tc.topK
+			if topK <= 0 {
+				topK = 10
+			}
+			got := pickFair(tc.jobs, now, func(*jobState) bool { return false }, topK,
+				func([]string) map[string]float64 { return ratios })
+			if got == nil {
+				t.Fatalf("pickFair = nil, want %q", tc.want)
+			}
+			if got.JobID != tc.want {
 				t.Fatalf("pickFair = %q, want %q", got.JobID, tc.want)
 			}
 		})

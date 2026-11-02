@@ -114,6 +114,9 @@ create table if not exists records (
 comment on table records is 'Per-request telemetry; NO body columns, ever (D-I1).';
 create index if not exists records_user_created_idx on records (user_id, created_at desc);
 create index if not exists records_class_created_idx on records (class_id, created_at desc);
+-- v1 amendment (pre-release, WS-11): the D-F2 served-side aggregate joins
+-- records by router_id within the fairness window.
+create index if not exists records_router_created_idx on records (router_id, created_at desc);
 
 create table if not exists batches (
     id          uuid primary key default gen_random_uuid(),

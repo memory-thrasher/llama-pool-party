@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,10 @@ const (
 	stDone    = "done"
 )
 
+// codePreToken is the error/records code for the overflow terminal
+// (DISP-RESIDUAL-1): the prompt exceeded every candidate's context.
+const codePreToken = "pre_token"
+
 type jobState struct {
 	JobID string
 	UserID string
@@ -65,6 +70,7 @@ type jobState struct {
 	Status string
 
 	Bounces int
+	ParkCount int // consecutive parks; grows the re-offer backoff (DISP-RESIDUAL-1)
 	NextOfferAt time.Time // zero = eligible now
 
 	CreatedAt time.Time
@@ -81,6 +87,12 @@ type jobState struct {
 	// per-router connectivity (and thus the live selectCandidates result)
 	// changes mid-pass. Reset to nil by parkJob to start a fresh pass.
 	passCands []candidate
+
+	// passBounces/passOverflow count the rejections of the current offer pass
+	// (since the last park): every candidate rejecting with a pre_token
+	// overflow makes the exhaustion terminal (DISP-RESIDUAL-1).
+	passBounces  int
+	passOverflow int
 
 	// Continuity (D-E2/D-E3): Cont is the conversation's hint snapshot captured
 	// at register (nil = first turn of the conversation); contPriority/contEvicted
@@ -155,7 +167,9 @@ type Dispatcher struct {
 	leaseDefaultMS int
 	jobExpiry time.Duration
 	runningCap time.Duration // POOL_RUNNING_CAP_MS (D-G2 running cap)
-	parkDelay time.Duration
+	parkBackoff time.Duration // POOL_PARK_BACKOFF_MS base (DISP-RESIDUAL-1)
+	fairWindowMS int          // POOL_FAIR_WINDOW_MS (D-F2 rolling window)
+	fairTopK     int          // POOL_FAIR_TOPK (D-F3 selection window)
 	contIdleMS   time.Duration // POOL_CONT_IDLE_MS (D-E2 skip window)
 	contPreferMS time.Duration // POOL_CONT_PREFER_MS (D-E2 soft preference)
 	purge Purger
@@ -175,7 +189,6 @@ type Dispatcher struct {
 type Opts struct {
 	MaxBounces int
 	LeaseDefaultMS int
-	ParkDelay time.Duration // 0 = 5s
 	// e2e fix: BodyReady reports whether the origin has staged the job's body
 	// file. A job is only offerable once the body is staged (catalog: "the
 	// coordinator treats the job as *queued* when the body PUT completes").
@@ -192,6 +205,15 @@ type Opts struct {
 	// RunningCapMS caps running jobs in ms (POOL_RUNNING_CAP_MS, D-G2);
 	// 0 takes the default (5m).
 	RunningCapMS int
+	// FairWindowMS is the D-F2 rolling window in ms (POOL_FAIR_WINDOW_MS);
+	// 0 takes the default (7 days).
+	FairWindowMS int
+	// FairTopK is the D-F3 selection window (POOL_FAIR_TOPK): the k oldest
+	// pending jobs the fairness pick considers; 0 takes the default (10).
+	FairTopK int
+	// ParkBackoffMS is the base parked-job re-offer backoff in ms
+	// (POOL_PARK_BACKOFF_MS); 0 takes the default (500ms).
+	ParkBackoffMS int
 }
 
 func (o Opts) withDefaults() Opts {
@@ -200,9 +222,6 @@ func (o Opts) withDefaults() Opts {
 	}
 	if o.LeaseDefaultMS <= 0 {
 		o.LeaseDefaultMS = config.DefaultOfferLeaseMS
-	}
-	if o.ParkDelay <= 0 {
-		o.ParkDelay = 5 * time.Second
 	}
 	if o.ContIdleMS <= 0 {
 		o.ContIdleMS = config.DefaultContIdleMS
@@ -216,6 +235,15 @@ func (o Opts) withDefaults() Opts {
 	if o.RunningCapMS <= 0 {
 		o.RunningCapMS = config.DefaultRunningCapMS
 	}
+	if o.FairWindowMS <= 0 {
+		o.FairWindowMS = config.DefaultFairWindowMS
+	}
+	if o.FairTopK <= 0 {
+		o.FairTopK = config.DefaultFairTopK
+	}
+	if o.ParkBackoffMS <= 0 {
+		o.ParkBackoffMS = config.DefaultParkBackoffMS
+	}
 	return o
 }
 
@@ -228,7 +256,9 @@ func New(db *pooldb.DB, hub RouterHub, opts Opts, purge Purger) *Dispatcher {
 		leaseDefaultMS: opts.LeaseDefaultMS,
 		jobExpiry: time.Duration(opts.JobExpiryMS) * time.Millisecond,
 		runningCap: time.Duration(opts.RunningCapMS) * time.Millisecond,
-		parkDelay: opts.ParkDelay,
+		parkBackoff:  time.Duration(opts.ParkBackoffMS) * time.Millisecond,
+		fairWindowMS: opts.FairWindowMS,
+		fairTopK:     opts.FairTopK,
 		contIdleMS: time.Duration(opts.ContIdleMS) * time.Millisecond, contPreferMS: time.Duration(opts.ContPreferMS) * time.Millisecond,
 		purge: purge,
 		bodyReady: opts.BodyReady,
@@ -402,7 +432,7 @@ func (d *Dispatcher) sweep() {
 		}
 	}
 
-	// Parked jobs retry after the park delay.
+	// Parked jobs retry after their backoff.
 	for _, j := range d.jobs {
 		if j.Status == stPending && !j.NextOfferAt.IsZero() && now.After(j.NextOfferAt) {
 			d.logf("dispatch: parked job %s retry (candidate idx %d)", j.JobID, j.CandidateIdx)
@@ -419,9 +449,10 @@ func (d *Dispatcher) sweep() {
 	}
 
 	// Fair offer pass: one job at a time. A warm continuation (D-E2 skip-
-	// the-line) is picked before the older jobs; within each group, per-user
-	// FIFO with users ordered by created_at (WS-11 fairness is out of scope).
-	pick := pickFair(d.jobs, now, func(j *jobState) bool { return d.isWarmHint(j, now) })
+	// the-line) is picked before the fairness window; the fairness pick
+	// (D-F2/D-F3) serves the highest-priority user among the k oldest
+	// eligible jobs, at their oldest job (per-user FIFO).
+	pick := d.pickFair(now)
 	if pick != nil {
 		if d.isWarmHint(pick, now) {
 			pick.contPriority = true
@@ -431,11 +462,14 @@ func (d *Dispatcher) sweep() {
 }
 
 // pickFair returns the pending job to offer next (or nil): warm-continuation
-// jobs (isWarm) before the rest, and within each group per-user FIFO with
-// users ordered by created_at. Jobs parked until NextOfferAt are not eligible.
-func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) bool) *jobState {
-	var warmPick, pick *jobState
-	var pickKey time.Time
+// jobs (isWarm) before the rest (D-E2 skip-the-line), and for the rest the
+// D-F3 fairness pick: among the topK oldest eligible jobs, the user with the
+// highest D-F2 ratio is served, at their oldest job in the window (per-user
+// FIFO - a user's jobs never reorder relative to each other). Jobs parked
+// until NextOfferAt are not eligible in either group.
+func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) bool, topK int, ratios func([]string) map[string]float64) *jobState {
+	var warmPick *jobState
+	var eligible []*jobState
 	for _, j := range jobs {
 		if j.Status != stPending {
 			continue
@@ -451,14 +485,117 @@ func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) b
 			}
 			continue
 		}
-		if pick == nil || t.Before(pickKey) || (t.Equal(pickKey) && beforeInLine(j, pick)) {
-			pick, pickKey = j, t
-		}
+		eligible = append(eligible, j)
 	}
 	if warmPick != nil {
 		return warmPick
 	}
-	return pick
+	if len(eligible) == 0 {
+		return nil
+	}
+	// The fairness window: the k oldest eligible jobs (D-F3).
+	sort.Slice(eligible, func(i, j int) bool {
+		if !eligible[i].CreatedAt.Equal(eligible[j].CreatedAt) {
+			return eligible[i].CreatedAt.Before(eligible[j].CreatedAt)
+		}
+		return eligible[i].JobID < eligible[j].JobID
+	})
+	if topK > 0 && len(eligible) > topK {
+		eligible = eligible[:topK]
+	}
+	// Each user's oldest job in the window, in first-seen (oldest) order.
+	oldest := make(map[string]*jobState, len(eligible))
+	order := make([]string, 0, len(eligible))
+	for _, j := range eligible {
+		if _, ok := oldest[j.UserID]; !ok {
+			oldest[j.UserID] = j
+			order = append(order, j.UserID)
+		}
+	}
+	r := ratios(order)
+	// Highest ratio wins; tie -> the user with the oldest job in the window.
+	best := oldest[order[0]]
+	for _, u := range order[1:] {
+		if ru, rb := fairRatio(r, u), fairRatio(r, best.UserID); ru > rb ||
+			(ru == rb && oldest[u].CreatedAt.Before(best.CreatedAt)) {
+			best = oldest[u]
+		}
+	}
+	return best
+}
+
+// fairRatio looks up a user's D-F2 priority; absent = the (0+1)/(0+1) = 1.0
+// baseline (new member, or an empty window).
+func fairRatio(r map[string]float64, user string) float64 {
+	if v, ok := r[user]; ok {
+		return v
+	}
+	return 1.0
+}
+
+// pickFair runs the dispatcher's per-tick offer pick.
+func (d *Dispatcher) pickFair(now time.Time) *jobState {
+	return pickFair(d.jobs, now, func(j *jobState) bool { return d.isWarmHint(j, now) },
+		d.fairTopK, d.fairRatios)
+}
+
+// fairRatios computes the D-F2 priority ratio (served + 1) / (consumed + 1)
+// for the given users, once per offer pass (two aggregate queries). served =
+// response tokens the user's routers served (any consumer); consumed =
+// response tokens the user consumed (from any router); both ok, both within
+// the rolling window. A user with no in-window records gets the 1.0
+// baseline (absent from the map).
+func (d *Dispatcher) fairRatios(users []string) map[string]float64 {
+	ratios := make(map[string]float64, len(users))
+	for _, u := range users {
+		ratios[u] = 1.0
+	}
+	if len(users) == 0 {
+		return ratios
+	}
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		if q := pooldb.UUID(u); q != "NULL" {
+			ids = append(ids, q)
+		}
+	}
+	if len(ids) == 0 {
+		return ratios
+	}
+	in := strings.Join(ids, ", ")
+	cutoff := fmt.Sprintf("now() - interval '%d milliseconds'", d.fairWindowMS)
+	served := d.fairSum(cutoff, in, `left join routers r on r.owner_id = u.id
+left join records rec on rec.router_id = r.id and rec.ok and rec.created_at >= `)
+	consumed := d.fairSum(cutoff, in, `left join records rec on rec.user_id = u.id and rec.ok and rec.created_at >= `)
+	for _, u := range users {
+		ratios[u] = (served[u] + 1) / (consumed[u] + 1)
+	}
+	return ratios
+}
+
+// fairSum runs one D-F2 aggregate (the join clause selects the served or
+// consumed side) and returns user_id -> response-token sum (missing = 0).
+func (d *Dispatcher) fairSum(cutoff, in, join string) map[string]float64 {
+	out := map[string]float64{}
+	query := fmt.Sprintf(`
+select u.id::text, coalesce(sum(rec.response_tokens), 0)
+from users u
+%s %s
+where u.id in (%s)
+group by u.id`, join, cutoff, in)
+	rows, err := d.db.Query(context.Background(), query)
+	if err != nil {
+		d.logf("dispatch: fairness ratio query: %v", err)
+		return out
+	}
+	for _, row := range rows {
+		f := strings.Split(row, ",")
+		if len(f) < 2 {
+			continue
+		}
+		out[f[0]] = atofCell(f[1])
+	}
+	return out
 }
 
 // isWarmHint reports whether j's continuation hint grants skip-the-line
@@ -730,9 +867,17 @@ func (d *Dispatcher) offerNext(j *jobState) {
 		d.logf("dispatch: offered job %s to %s (model %s)", j.JobID, short(c.routerID), c.modelID)
 		return
 	}
-	// Exhausted every candidate (rejections or unreachable): park and retry.
+	// Exhausted every candidate (rejections or unreachable).
 	j.CurrentCandidate = ""
 	if d.hasMembers(j) {
+		// DISP-RESIDUAL-1: exhaustion by pre_token overflow (every candidate
+		// said the prompt is too big) is terminal - the ctx never grows, so
+		// retrying is useless. The message carries the D-C5 overflow substring
+		// (pi matches it, compacts, and retries the request smaller).
+		if j.overflowExhausted() {
+			d.failOverflow(j)
+			return
+		}
 		d.parkJob(j, fmt.Sprintf("candidate loop exhausted (%d bounces)", j.Bounces))
 		return
 	}
@@ -740,7 +885,25 @@ func (d *Dispatcher) offerNext(j *jobState) {
 		"no loaded member for class "+j.Tag+" (D-C7)", 0, 0, int(time.Since(j.CreatedAt).Milliseconds()), 0)
 }
 
-// parkJob leaves the job pending; the sweep retries it after the park delay.
+// overflowExhausted reports whether the current pass was rejected entirely
+// by pre_token overflows (DISP-RESIDUAL-1): retrying cannot help, the job is
+// terminal.
+func (j *jobState) overflowExhausted() bool {
+	return j.passBounces > 0 && j.passOverflow == j.passBounces
+}
+
+// failOverflow terminal-fails an overflow-exhausted job (DISP-RESIDUAL-1): the
+// records row and the mirrored origin envelope carry code pre_token and the
+// D-C5 overflow substring; the body is purged.
+func (d *Dispatcher) failOverflow(j *jobState) {
+	d.failJob(j, codePreToken,
+		fmt.Sprintf("request exceeds the available context size on every candidate of class %s (D-C5)", j.Tag),
+		0, 0, int(time.Since(j.CreatedAt).Milliseconds()), 0)
+}
+
+// parkJob leaves the job pending; the sweep re-offers it after the backoff
+// (DISP-RESIDUAL-1: POOL_PARK_BACKOFF_MS doubling per consecutive park, so an
+// exhausted candidate loop stops tight-retrying until the job expiry).
 func (d *Dispatcher) parkJob(j *jobState, why string) {
 	j.Status = stPending
 	j.CurrentCandidate = ""
@@ -751,10 +914,28 @@ func (d *Dispatcher) parkJob(j *jobState, why string) {
 	// until expiry). Drop the cached list so the next pass re-selects.
 	j.CandidateIdx = 0
 	j.passCands = nil
+	j.passBounces = 0
+	j.passOverflow = 0
 	j.LeaseExpiresAt = time.Time{}
-	j.NextOfferAt = time.Now().Add(d.parkDelay)
+	j.NextOfferAt = time.Now().Add(d.parkDelay(j.ParkCount))
+	j.ParkCount++
 	d.persistStatus(j, stPending)
-	d.logf("dispatch: job %s parked: %s", j.JobID, why)
+	d.logf("dispatch: job %s parked: %s (backoff %s, %d consecutive)",
+		j.JobID, why, d.parkDelay(j.ParkCount-1), j.ParkCount)
+}
+
+// parkDelay is the backoff before re-offering the n-th consecutive park:
+// POOL_PARK_BACKOFF_MS doubling, capped at 10x the base (~5s at the default).
+func (d *Dispatcher) parkDelay(n int) time.Duration {
+	cap := d.parkBackoff * 10
+	delay := d.parkBackoff
+	for i := 0; i < n && delay < cap; i++ {
+		delay *= 2
+	}
+	if delay > cap {
+		delay = cap
+	}
+	return delay
 }
 
 func (d *Dispatcher) applyOp(op dispatchOp) {
@@ -888,6 +1069,7 @@ func (d *Dispatcher) accept(op dispatchOp, errOut chan error) {
 	}
 	j.LeaseExpiresAt = time.Now().Add(time.Duration(lease) * time.Millisecond)
 	j.AcceptedAt = time.Now() // body pull + response push now allowed (review H2)
+	j.ParkCount = 0            // the streak of consecutive parks is broken
 	d.persistStatus(j, stOffered)
 	d.logf("dispatch: job %s accepted by %s; lease %dms", j.JobID, short(j.CurrentCandidate), lease)
 }
@@ -908,6 +1090,7 @@ func (d *Dispatcher) rejectOrAbort(op dispatchOp, errOut chan error, isAbort boo
 		d.parkJob(j, fmt.Sprintf("%s: bounce limit %d (D-G1)", op.reason, d.maxBounces))
 		return
 	}
+	j.passBounces++
 	d.logf("dispatch: job %s %s by %s (%s); %d/%d bounces",
 		j.JobID, kind, short(j.CurrentCandidate), op.reason, j.Bounces, d.maxBounces)
 	j.CandidateIdx++
@@ -928,7 +1111,18 @@ func (d *Dispatcher) errorReport(op dispatchOp, errOut chan error) {
 			return
 		}
 		j.Bounces++
+		j.passBounces++
+		if op.code == poolproto.ErrorOverflow {
+			j.passOverflow++
+		}
 		if j.Bounces > d.maxBounces {
+			// Same as the exhausted loop: an all-overflow pass is terminal even
+			// when the pass ends at the bounce limit (more candidates than the
+			// limit).
+			if j.overflowExhausted() {
+				d.failOverflow(j)
+				return
+			}
 			d.parkJob(j, fmt.Sprintf("pre_token error: bounce limit %d (D-G1)", d.maxBounces))
 			return
 		}
@@ -1234,6 +1428,7 @@ func (d *Dispatcher) internalReject(op dispatchOp, errOut chan error) {
 		return
 	}
 	j.Bounces++
+	j.passBounces++
 	if j.Bounces > d.maxBounces {
 		d.parkJob(j, fmt.Sprintf("eviction: bounce limit %d (D-G1)", d.maxBounces))
 		return
@@ -1309,6 +1504,12 @@ func firstIntPtr(p *int) int {
 func atoiCell(cell string) int {
 	var n int
 	fmt.Sscanf(cell, "%d", &n)
+	return n
+}
+
+func atofCell(cell string) float64 {
+	var n float64
+	fmt.Sscanf(cell, "%g", &n)
 	return n
 }
 
