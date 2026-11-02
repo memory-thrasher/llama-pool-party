@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -88,6 +89,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /pool/jobs/{id}/response", s.handlePutResponse)
 	mux.HandleFunc("GET /pool/classes", s.handleClasses)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+
+	// Admin endpoints
+	mux.HandleFunc("POST /api/admin/users/invite", s.handleAdminInviteUser)
+	mux.HandleFunc("GET /api/admin/users", s.handleAdminListUsers)
+	mux.HandleFunc("POST /api/admin/users/{id}/suspend", s.handleAdminSuspendUser)
+	mux.HandleFunc("POST /api/admin/users/{id}/activate", s.handleAdminActivateUser)
+	mux.HandleFunc("POST /api/admin/tokens/revoke", s.handleAdminRevokeToken)
+
+	// Self-service endpoints
+	mux.HandleFunc("POST /api/auth/activate", s.handleSelfActivate)
+	mux.HandleFunc("GET /api/me", s.handleMe)
+	mux.HandleFunc("POST /api/me/tokens", s.handleMeCreateToken)
+	mux.HandleFunc("POST /api/me/tokens/revoke", s.handleMeRevokeToken)
+
 	return mux
 }
 
@@ -167,17 +182,39 @@ func short(s string) string {
 // authUser authenticates the bearer token: it must match a non-revoked row of
 // user_tokens (hash compare, revoked_at is null, D-J2). The token
 // identifies the USER; the returned user id scopes every operation.
+// It also rejects SUSPENDED users (WS-13).
 func (s *Server) authUser(r *http.Request) (string, error) {
 	token := r.Header.Get("Authorization")
 	token = strings.TrimPrefix(token, "Bearer ")
 	tokenHash := sha256hex(token)
-	q := fmt.Sprintf("select user_id from user_tokens where token_hash = %s and revoked_at is null",
+	q := fmt.Sprintf(`
+select u.id
+from user_tokens t
+join users u on t.user_id = u.id
+where t.token_hash = %s
+  and t.revoked_at is null
+  and u.status in ('invited', 'active')`,
 		pooldb.S(tokenHash))
 	userID, err := s.db.FirstString(r.Context(), q)
 	if err != nil || userID == "" {
-		return "", fmt.Errorf("auth: bad or revoked token")
+		return "", fmt.Errorf("auth: bad, revoked, or suspended token")
 	}
 	return userID, nil
+}
+
+// isAdmin checks if the user has the 'admin' role.
+func (s *Server) isAdmin(ctx context.Context, userID string) bool {
+	n, err := s.db.FirstBool(ctx, fmt.Sprintf("select 1 from users where id = %s and role = 'admin'", pooldb.UUID(userID)))
+	return err == nil && n
+}
+
+// newToken generates a 64-hex opaque 256-bit token (D-J2).
+func newToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // Should not happen with crypto/rand
+	}
+	return hex.EncodeToString(b)
 }
 
 func sha256hex(s string) string {
