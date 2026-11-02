@@ -28,12 +28,21 @@ func (s *Server) handleAdminInviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Email == "" || !strings.Contains(req.Email, "@") || len(req.Email) > 320 {
+	if req.Email == "" || !strings.Contains(req.Email, "@") || !freeTextOK(req.Email, 320) {
 		http.Error(w, "bad email", http.StatusBadRequest)
+		return
+	}
+	if !freeTextOK(req.DisplayName, 64) {
+		http.Error(w, "bad display_name", http.StatusBadRequest)
 		return
 	}
 
 	ctx := r.Context()
+	if n, _ := s.db.Count(ctx, "select count(*) from users where email = " + pooldb.S(req.Email)); n > 0 {
+		http.Error(w, "email already exists", http.StatusConflict)
+		return
+	}
+
 	token := newToken()
 	tokenHash := sha256hex(token)
 
@@ -109,6 +118,9 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			for _, trow := range trows {
 				tf := strings.Split(trow, ",")
+				if len(tf) < 2 {
+					continue
+				}
 				ut := tokenResponse{
 					Name:       tf[0],
 					CreatedAt:  tf[1],
@@ -142,10 +154,15 @@ func (s *Server) handleAdminSuspendUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if pooldb.UUID(id) == pooldb.UUID(userID) {
+		http.Error(w, "cannot suspend self", http.StatusBadRequest)
+		return
+	}
+
 	ctx := r.Context()
 	isAdmin, err := s.db.FirstBool(ctx, fmt.Sprintf("select 1 from users where id = %s and role = 'admin'", pooldb.UUID(id)))
 	if err == nil && isAdmin {
-		http.Error(w, "cannot suspend admin", http.StatusConflict)
+		http.Error(w, "cannot suspend admin", http.StatusBadRequest)
 		return
 	}
 
@@ -155,7 +172,7 @@ func (s *Server) handleAdminSuspendUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if status == "suspended" {
-		http.Error(w, "already suspended", http.StatusConflict)
+		http.Error(w, "already suspended", http.StatusBadRequest)
 		return
 	}
 
@@ -224,6 +241,20 @@ func (s *Server) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
+	row, err := s.db.FirstString(ctx, fmt.Sprintf("select u.id, u.role, revoked_at is null from user_tokens t join users u on u.id = t.user_id where t.id = %s", pooldb.UUID(req.TokenID)))
+	if err != nil || row == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	f := strings.Split(row, ",")
+	if f[1] == "admin" && f[0] != userID {
+		http.Error(w, "cannot revoke another admin's token", http.StatusBadRequest)
+		return
+	}
+	if f[2] != "t" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := s.db.Exec(ctx, fmt.Sprintf("update user_tokens set revoked_at = now() where id = %s", pooldb.UUID(req.TokenID))); err != nil {
 		http.Error(w, "failed to revoke", http.StatusInternalServerError)
 		return
@@ -251,10 +282,7 @@ func (s *Server) handleSelfActivate(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if status == "suspended" {
-		http.Error(w, "suspended", http.StatusForbidden)
-		return
-	}
+	// suspended is unreachable here: authUser rejects suspended tokens first
 	if status != "invited" {
 		http.Error(w, "invalid status", http.StatusBadRequest)
 		return
@@ -298,6 +326,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		for _, trow := range trows {
 			tf := strings.Split(trow, ",")
+			if len(tf) < 2 {
+				continue
+			}
 			ut := tokenResponse{
 				Name:       tf[0],
 				CreatedAt:  tf[1],
@@ -327,8 +358,8 @@ func (s *Server) handleMeCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	if !freeTextOK(req.Name, 64) {
+		http.Error(w, "bad name", http.StatusBadRequest)
 		return
 	}
 
@@ -357,6 +388,20 @@ func (s *Server) handleMeCreateToken(w http.ResponseWriter, r *http.Request) {
 	}{Token: token})
 }
 
+// freeTextOK: psql -At splits rows on newlines and fields on commas
+// (pooldb.Query), so free text must contain neither.
+func freeTextOK(s string, maxLen int) bool {
+	if s == "" || len(s) > maxLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' || s[i] < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleMeRevokeToken(w http.ResponseWriter, r *http.Request) {
 	userID, err := s.authUser(r)
 	if err != nil {
@@ -371,9 +416,13 @@ func (s *Server) handleMeRevokeToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	n, err := s.db.FirstBool(ctx, fmt.Sprintf("select 1 from user_tokens where id = %s and user_id = %s", pooldb.UUID(req.TokenID), pooldb.UUID(userID)))
-	if err != nil || !n {
+	active, err := s.db.FirstBool(ctx, fmt.Sprintf("select revoked_at is null from user_tokens where id = %s and user_id = %s", pooldb.UUID(req.TokenID), pooldb.UUID(userID)))
+	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !active {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 

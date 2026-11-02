@@ -303,3 +303,251 @@ func TestAuth_AdminGate(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestAuth_NameInjection(t *testing.T) {
+	env := newE2E(t)
+
+	_, token := setupAuthUser(t, env, "inj@example.com", "Inj User", "member", "active")
+
+	// commas and control chars in a token name would fragment psql -At rows
+	// (index panic / field shift) - rejected at the entry point
+	for _, bad := range []string{"a,b", "a\nb", "a\tb"} {
+		req, _ := http.NewRequest("POST", env.baseURL+"/api/me/tokens", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		body, _ := json.Marshal(map[string]string{"name": bad})
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("name %q should be 400: status=%d err=%v", bad, resp.StatusCode, err)
+		}
+		resp.Body.Close()
+	}
+
+	// a plain name with spaces is fine
+	req, _ := http.NewRequest("POST", env.baseURL+"/api/me/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	body, _ := json.Marshal(map[string]string{"name": "laptop key"})
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("plain name should be 201: status=%d err=%v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+
+	// /api/me lists it and the admin list stays healthy (no panic, no shift)
+	req, _ = http.NewRequest("GET", env.baseURL+"/api/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("me should be 200: status=%d err=%v", resp.StatusCode, err)
+	}
+	var meRes meResponse
+	json.NewDecoder(resp.Body).Decode(&meRes)
+	resp.Body.Close()
+	found := false
+	for _, tk := range meRes.Tokens {
+		if tk.Name == "laptop key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("created token not listed in /api/me")
+	}
+
+	req, _ = http.NewRequest("GET", env.baseURL+"/api/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin list should be 200: status=%d err=%v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+}
+
+func TestAuth_InviteValidation(t *testing.T) {
+	env := newE2E(t)
+
+	do := func(email, name string) int {
+		req, _ := http.NewRequest("POST", env.baseURL+"/api/admin/users/invite", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		b, _ := json.Marshal(inviteUserReq{Email: email, DisplayName: name})
+		req.Body = io.NopCloser(bytes.NewReader(b))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		resp.Body.Close()
+		return code
+	}
+
+	if code := do("emptyname@example.com", ""); code != http.StatusBadRequest {
+		t.Fatalf("empty display_name should be 400: %d", code)
+	}
+	if code := do("comma@example.com,x", "X"); code != http.StatusBadRequest {
+		t.Fatalf("comma in email should be 400: %d", code)
+	}
+	if code := do("newline@example\n.com", "X"); code != http.StatusBadRequest {
+		t.Fatalf("newline in email should be 400: %d", code)
+	}
+
+	if code := do("dup@example.com", "Dup"); code != http.StatusCreated {
+		t.Fatalf("first invite should be 201: %d", code)
+	}
+	if code := do("dup@example.com", "Dup2"); code != http.StatusConflict {
+		t.Fatalf("duplicate email should be 409: %d", code)
+	}
+}
+
+func TestAuth_SuspendStatuses(t *testing.T) {
+	env := newE2E(t)
+	ctx := context.Background()
+
+	adminID, _ := env.db.FirstString(ctx, "select id from users where role = 'admin' limit 1")
+
+	suspend := func(id string) int {
+		req, _ := http.NewRequest("POST", env.baseURL+"/api/admin/users/"+id+"/suspend", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		resp.Body.Close()
+		return code
+	}
+
+	// self-suspend -> 400
+	if code := suspend(adminID); code != http.StatusBadRequest {
+		t.Fatalf("self-suspend should be 400: %d", code)
+	}
+
+	// suspending another admin -> 400
+	setupAuthUser(t, env, "admin2@example.com", "Admin Two", "admin", "active")
+	admin2ID, _ := env.db.FirstString(ctx, "select id from users where email = 'admin2@example.com'")
+	if code := suspend(admin2ID); code != http.StatusBadRequest {
+		t.Fatalf("suspend admin should be 400: %d", code)
+	}
+
+	// member: first suspend 200, second 400 (already suspended)
+	setupAuthUser(t, env, "susmem@example.com", "Sus Mem", "member", "active")
+	memID, _ := env.db.FirstString(ctx, "select id from users where email = 'susmem@example.com'")
+	if code := suspend(memID); code != http.StatusOK {
+		t.Fatalf("first suspend should be 200: %d", code)
+	}
+	if code := suspend(memID); code != http.StatusBadRequest {
+		t.Fatalf("second suspend should be 400: %d", code)
+	}
+
+	// double-activate an active user -> 409
+	setupAuthUser(t, env, "dblact@example.com", "Dbl Act", "member", "active")
+	dblID, _ := env.db.FirstString(ctx, "select id from users where email = 'dblact@example.com'")
+	act := func(id string) int {
+		req, _ := http.NewRequest("POST", env.baseURL+"/api/admin/users/"+id+"/activate", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		resp.Body.Close()
+		return code
+	}
+	if code := act(dblID); code != http.StatusConflict {
+		t.Fatalf("double-activate should be 409: %d", code)
+	}
+}
+
+func TestAuth_SuspendedSelfActivate(t *testing.T) {
+	env := newE2E(t)
+
+	_, token := setupAuthUser(t, env, "suspself@example.com", "Susp Self", "member", "suspended")
+
+	// suspended tokens are rejected by authUser before the handler runs
+	req, _ := http.NewRequest("POST", env.baseURL+"/api/auth/activate", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("suspended self-activate should be 401: status=%d err=%v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+}
+
+func TestAuth_AdminRevokeGuards(t *testing.T) {
+	env := newE2E(t)
+	ctx := context.Background()
+
+	revoke := func(tokenID string) int {
+		req, _ := http.NewRequest("POST", env.baseURL+"/api/admin/tokens/revoke", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		b, _ := json.Marshal(revokeTokenReq{TokenID: tokenID})
+		req.Body = io.NopCloser(bytes.NewReader(b))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := resp.StatusCode
+		resp.Body.Close()
+		return code
+	}
+
+	// another admin's token -> 400 (lockout protection)
+	setupAuthUser(t, env, "admin2@example.com", "Admin Two", "admin", "active")
+	admin2TokID, _ := env.db.FirstString(ctx, "select id from user_tokens where user_id = (select id from users where email = 'admin2@example.com') and name = 'default'")
+	if code := revoke(admin2TokID); code != http.StatusBadRequest {
+		t.Fatalf("revoke another admin token should be 400: %d", code)
+	}
+
+	// nonexistent token -> 404
+	if code := revoke("00000000-0000-0000-0000-000000000000"); code != http.StatusNotFound {
+		t.Fatalf("revoke nonexistent should be 404: %d", code)
+	}
+
+	// member token -> 200, then 401 on use
+	_, mtok := setupAuthUser(t, env, "rgmem@example.com", "RG Mem", "member", "active")
+	mtokID, _ := env.db.FirstString(ctx, "select id from user_tokens where user_id = (select id from users where email = 'rgmem@example.com') and name = 'default'")
+	if code := revoke(mtokID); code != http.StatusOK {
+		t.Fatalf("revoke member token should be 200: %d", code)
+	}
+
+	// re-revoke is a 200 no-op and keeps the original revoked_at
+	ra, _ := env.db.FirstString(ctx, "select revoked_at from user_tokens where id = " + pooldb.UUID(mtokID))
+	if code := revoke(mtokID); code != http.StatusOK {
+		t.Fatalf("re-revoke should be 200: %d", code)
+	}
+	rb, _ := env.db.FirstString(ctx, "select revoked_at from user_tokens where id = " + pooldb.UUID(mtokID))
+	if ra != rb {
+		t.Fatalf("re-revoke changed revoked_at: %s -> %s", ra, rb)
+	}
+
+	req, _ := http.NewRequest("GET", env.baseURL+"/api/me", nil)
+	req.Header.Set("Authorization", "Bearer "+mtok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked token should be 401: status=%d err=%v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+}
+
+func TestAuth_ListNoHashes(t *testing.T) {
+	env := newE2E(t)
+
+	_, token := setupAuthUser(t, env, "listhash@example.com", "List Hash", "member", "active")
+	tokenHash := sha256hex(token)
+
+	req, _ := http.NewRequest("GET", env.baseURL+"/api/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin list failed: status=%d err=%v", resp.StatusCode, err)
+	}
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+	resp.Body.Close()
+
+	if strings.Contains(buf.String(), "token_hash") {
+		t.Fatal("admin list contains token_hash key")
+	}
+	if strings.Contains(buf.String(), tokenHash) {
+		t.Fatal("admin list contains a token hash value")
+	}
+}
