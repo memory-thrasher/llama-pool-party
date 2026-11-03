@@ -60,6 +60,13 @@ const (
 	// returns the existing job (200); beyond it the id is released and the
 	// prompt is fresh work (201).
 	DefaultDedupeWindowMS = 300000
+	// DefaultBatchWeight is the D-F2 weight of a batch job's consumed tokens
+	// (POOL_BATCH_WEIGHT, D-H1): a small reward for choosing batch over
+	// real-time.
+	DefaultBatchWeight = 0.5
+	// DefaultBatchExpiryMS caps how long a priority=batch job may wait before
+	// it fails (POOL_BATCH_EXPIRY_MS, D-H1); live jobs keep DefaultJobExpiryMS.
+	DefaultBatchExpiryMS = 86400000
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -99,6 +106,11 @@ type Config struct {
 	ParkBackoffMS int
 	// DedupeWindowMS is the intake dedupe window, ms (POOL_DEDUPE_WINDOW_MS, D-G5).
 	DedupeWindowMS int
+	// BatchWeight is the D-F2 weight of a batch job's consumed tokens
+	// (POOL_BATCH_WEIGHT, D-H1).
+	BatchWeight float64
+	// BatchExpiryMS caps pending/offered priority=batch jobs (POOL_BATCH_EXPIRY_MS).
+	BatchExpiryMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -112,22 +124,24 @@ func env(name, def string) string {
 // Load reads configuration from the environment.
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:      env("COORD_ADDR", DefaultAddr),
-		DSN:       env("COORD_DSN", ""),
-		StaticDir: env("COORD_STATIC_DIR", DefaultStaticDir),
-		LogLevel:  env("COORD_LOG_LEVEL", DefaultLogLevel),
-		DataDir: env("POOL_DATA_DIR", DefaultDataDir),
-		OfferLeaseMS: atoi(env("POOL_OFFER_LEASE_MS", ""), DefaultOfferLeaseMS),
-		MaxBounces:  atoi(env("POOL_MAX_BOUNCES", ""), DefaultMaxBounces),
-		HeartbeatMS: atoi(env("POOL_HEARTBEAT_MS", ""), DefaultHeartbeatMS),
-		ContIdleMS:   atoi(env("POOL_CONT_IDLE_MS", ""), DefaultContIdleMS),
-		ContPreferMS: atoi(env("POOL_CONT_PREFER_MS", ""), DefaultContPreferMS),
-		JobExpiryMS:  atoi(env("POOL_JOB_EXPIRY_MS", ""), DefaultJobExpiryMS),
-		RunningCapMS: atoi(env("POOL_RUNNING_CAP_MS", ""), DefaultRunningCapMS),
-		FairWindowMS: atoi(env("POOL_FAIR_WINDOW_MS", ""), DefaultFairWindowMS),
-		FairTopK:     atoi(env("POOL_FAIR_TOPK", ""), DefaultFairTopK),
-		ParkBackoffMS: atoi(env("POOL_PARK_BACKOFF_MS", ""), DefaultParkBackoffMS),
+		Addr:           env("COORD_ADDR", DefaultAddr),
+		DSN:            env("COORD_DSN", ""),
+		StaticDir:      env("COORD_STATIC_DIR", DefaultStaticDir),
+		LogLevel:       env("COORD_LOG_LEVEL", DefaultLogLevel),
+		DataDir:        env("POOL_DATA_DIR", DefaultDataDir),
+		OfferLeaseMS:   atoi(env("POOL_OFFER_LEASE_MS", ""), DefaultOfferLeaseMS),
+		MaxBounces:     atoi(env("POOL_MAX_BOUNCES", ""), DefaultMaxBounces),
+		HeartbeatMS:    atoi(env("POOL_HEARTBEAT_MS", ""), DefaultHeartbeatMS),
+		ContIdleMS:     atoi(env("POOL_CONT_IDLE_MS", ""), DefaultContIdleMS),
+		ContPreferMS:   atoi(env("POOL_CONT_PREFER_MS", ""), DefaultContPreferMS),
+		JobExpiryMS:    atoi(env("POOL_JOB_EXPIRY_MS", ""), DefaultJobExpiryMS),
+		RunningCapMS:   atoi(env("POOL_RUNNING_CAP_MS", ""), DefaultRunningCapMS),
+		FairWindowMS:   atoi(env("POOL_FAIR_WINDOW_MS", ""), DefaultFairWindowMS),
+		FairTopK:       atoi(env("POOL_FAIR_TOPK", ""), DefaultFairTopK),
+		ParkBackoffMS:  atoi(env("POOL_PARK_BACKOFF_MS", ""), DefaultParkBackoffMS),
 		DedupeWindowMS: atoi(env("POOL_DEDUPE_WINDOW_MS", ""), DefaultDedupeWindowMS),
+		BatchWeight:    atof(env("POOL_BATCH_WEIGHT", ""), DefaultBatchWeight),
+		BatchExpiryMS:  atoi(env("POOL_BATCH_EXPIRY_MS", ""), DefaultBatchExpiryMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)
@@ -136,6 +150,13 @@ func Load() (Config, error) {
 }
 
 // Validate returns an error if the configuration is not usable.
+func (c Config) Validate() error {
+	if c.DSN == "" {
+		return errors.New("config: COORD_DSN is required for database-backed operation")
+	}
+	return nil
+}
+
 // atoi parses v as a positive int, falling back to def when v is empty
 // or not a positive integer.
 func atoi(v string, def int) int {
@@ -158,9 +179,16 @@ func atoi(v string, def int) int {
 	return n
 }
 
-func (c Config) Validate() error {
-	if c.DSN == "" {
-		return errors.New("config: COORD_DSN is required for database-backed operation")
+// atof parses v as a positive float, falling back to def when v is empty or
+// not a positive number (POOL_BATCH_WEIGHT).
+func atof(v string, def float64) float64 {
+	if v == "" {
+		return def
 	}
-	return nil
+	var n float64
+	_, err := fmt.Sscanf(v, "%g", &n)
+	if err != nil || n <= 0 || n > 100 {
+		return def
+	}
+	return n
 }

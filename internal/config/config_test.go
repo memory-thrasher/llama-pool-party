@@ -10,16 +10,18 @@ func setEnv(t *testing.T) {
 	// Clear all four COORD_* vars at the START of each test so results are hermetic
 	// even when the environment already defines them (t.Setenv restores the
 	// original value on cleanup).
-	for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS", "POOL_JOB_EXPIRY_MS", "POOL_RUNNING_CAP_MS"} {
+	for _, k := range envKeys {
 		t.Setenv(k, "")
 	}
 	// Backstop: leave nothing behind even if a future change skips the loop above.
 	t.Cleanup(func() {
-		for _, k := range []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS", "POOL_JOB_EXPIRY_MS", "POOL_RUNNING_CAP_MS"} {
+		for _, k := range envKeys {
 			t.Setenv(k, "")
 		}
 	})
 }
+
+var envKeys = []string{"COORD_ADDR", "COORD_DSN", "COORD_STATIC_DIR", "COORD_LOG_LEVEL", "POOL_CONT_IDLE_MS", "POOL_CONT_PREFER_MS", "POOL_JOB_EXPIRY_MS", "POOL_RUNNING_CAP_MS", "POOL_BATCH_WEIGHT", "POOL_BATCH_EXPIRY_MS"}
 
 func TestDefaults(t *testing.T) {
 	setEnv(t)
@@ -51,6 +53,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.RunningCapMS != DefaultRunningCapMS {
 		t.Errorf("RunningCapMS = %d, want %d", cfg.RunningCapMS, DefaultRunningCapMS)
 	}
+	if cfg.BatchWeight != DefaultBatchWeight {
+		t.Errorf("BatchWeight = %v, want %v", cfg.BatchWeight, DefaultBatchWeight)
+	}
+	if cfg.BatchExpiryMS != DefaultBatchExpiryMS {
+		t.Errorf("BatchExpiryMS = %d, want %d", cfg.BatchExpiryMS, DefaultBatchExpiryMS)
+	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() = nil with empty DSN, want error")
 	}
@@ -66,6 +74,8 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("POOL_CONT_PREFER_MS", "300000")
 	t.Setenv("POOL_JOB_EXPIRY_MS", "60000")
 	t.Setenv("POOL_RUNNING_CAP_MS", "45000")
+	t.Setenv("POOL_BATCH_WEIGHT", "0.25")
+	t.Setenv("POOL_BATCH_EXPIRY_MS", "7200000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -95,8 +105,28 @@ func TestEnvOverride(t *testing.T) {
 	if cfg.RunningCapMS != 45000 {
 		t.Errorf("RunningCapMS = %d, want 45000", cfg.RunningCapMS)
 	}
+	if cfg.BatchWeight != 0.25 {
+		t.Errorf("BatchWeight = %v, want 0.25", cfg.BatchWeight)
+	}
+	if cfg.BatchExpiryMS != 7200000 {
+		t.Errorf("BatchExpiryMS = %d, want 7200000", cfg.BatchExpiryMS)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestBatchWeightInvalidFallsBack(t *testing.T) {
+	setEnv(t)
+	for _, bad := range []string{"abc", "-1", "0", "1e30"} {
+		t.Setenv("POOL_BATCH_WEIGHT", bad)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() with POOL_BATCH_WEIGHT=%s: %v", bad, err)
+		}
+		if cfg.BatchWeight != DefaultBatchWeight {
+			t.Errorf("BatchWeight with %s = %v, want the default %v", bad, cfg.BatchWeight, DefaultBatchWeight)
+		}
 	}
 }
 

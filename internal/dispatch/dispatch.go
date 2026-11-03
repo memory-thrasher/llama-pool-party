@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,8 +46,8 @@ type Purger func(ctx context.Context, jobID string) error
 
 // In-memory job statuses (mirror queue_jobs.status).
 const (
-	stPending  = "pending"
-	stOffered  = "offered"
+	stPending = "pending"
+	stOffered = "offered"
 	stRunning = "running"
 	stFailed  = "failed"
 	stDone    = "done"
@@ -56,30 +57,35 @@ const (
 // (DISP-RESIDUAL-1): the prompt exceeded every candidate's context.
 const codePreToken = "pre_token"
 
+// codeCoordinatorRestart is the error/records code for a job that was offered
+// or running when the coordinator restarted (D-H2): its lease and relay are
+// dead, so the job terminal-fails instead of resuming.
+const codeCoordinatorRestart = "coordinator_restart"
+
 type jobState struct {
-	JobID string
-	UserID string
-	Tag string
-	Priority string
+	JobID           string
+	UserID          string
+	Tag             string
+	Priority        string
 	EstPromptTokens int
-	EstCtxNeeded int
-	ConvKey string // "" = null
+	EstCtxNeeded    int
+	ConvKey         string // "" = null
 
 	OriginRouter string
 
 	Status string
 
-	Bounces int
-	ParkCount int // consecutive parks; grows the re-offer backoff (DISP-RESIDUAL-1)
+	Bounces     int
+	ParkCount   int       // consecutive parks; grows the re-offer backoff (DISP-RESIDUAL-1)
 	NextOfferAt time.Time // zero = eligible now
 
-	CreatedAt time.Time
+	CreatedAt     time.Time
 	UserCreatedAt time.Time
 
-	CandidateIdx int
+	CandidateIdx     int
 	CurrentCandidate string // router offered to, awaiting decision
-	CandidateModel string
-	ServingRouterID string
+	CandidateModel   string
+	ServingRouterID  string
 
 	// passCands caches the candidate list for the current offer pass. It is
 	// captured once when the pass starts (CandidateIdx 0) and reused as the
@@ -105,11 +111,11 @@ type jobState struct {
 	contReason   string // '', 'idle', 'gone', 'error', 'evicted'
 	contDecided  bool
 
-	BodyPulled bool
+	BodyPulled     bool
 	LeaseExpiresAt time.Time // zero = no lease armed
-	AcceptedAt time.Time // zero = offered but not accepted (gates body pull/response push)
-	RunningAt time.Time // zero = not running yet (the running cap's timestamp, D-G2)
-	TerminalAt time.Time // zero = not terminal yet (memory GC uses this)
+	AcceptedAt     time.Time // zero = offered but not accepted (gates body pull/response push)
+	RunningAt      time.Time // zero = not running yet (the running cap's timestamp, D-G2)
+	TerminalAt     time.Time // zero = not terminal yet (memory GC uses this)
 
 	completion poolproto.Completion // stashed from the last completion event
 }
@@ -138,56 +144,60 @@ const (
 	opAffinity
 	opInternalReject
 	opContEvicted
+	opRestartFail
+	opDropMemory
 )
 
 type dispatchOp struct {
-	kind opKind
-	jobID string
-	leaseMS int
-	reason string
-	stage string
-	code string
-	message string
-	pt, rt *int
-	tq, ts *int
-	routerID string
-	modelID string
-	convKey string
-	entries []poolproto.AffinityEntry
+	kind       opKind
+	jobID      string
+	leaseMS    int
+	reason     string
+	stage      string
+	code       string
+	message    string
+	pt, rt     *int
+	tq, ts     *int
+	routerID   string
+	modelID    string
+	convKey    string
+	entries    []poolproto.AffinityEntry
 	completion poolproto.Completion
-	errOut chan error
+	errOut     chan error
 }
 
 // Dispatcher is the WS-06 dispatch engine. Construct with New, start with
 // Start, stop with Stop. All mutation happens on its single goroutine.
 type Dispatcher struct {
-	db *pooldb.DB
-	hub RouterHub
-	maxBounces int
+	db             *pooldb.DB
+	hub            RouterHub
+	maxBounces     int
 	leaseDefaultMS int
-	jobExpiry time.Duration
-	runningCap time.Duration // POOL_RUNNING_CAP_MS (D-G2 running cap)
-	parkBackoff time.Duration // POOL_PARK_BACKOFF_MS base (DISP-RESIDUAL-1)
-	fairWindowMS int          // POOL_FAIR_WINDOW_MS (D-F2 rolling window)
-	fairTopK     int          // POOL_FAIR_TOPK (D-F3 selection window)
-	contIdleMS   time.Duration // POOL_CONT_IDLE_MS (D-E2 skip window)
-	contPreferMS time.Duration // POOL_CONT_PREFER_MS (D-E2 soft preference)
-	purge Purger
-	bodyReady func(jobID string) bool // e2e fix: gates offerNext on the staged body
+	jobExpiry      time.Duration
+	runningCap     time.Duration // POOL_RUNNING_CAP_MS (D-G2 running cap)
+	parkBackoff    time.Duration // POOL_PARK_BACKOFF_MS base (DISP-RESIDUAL-1)
+	fairWindowMS   int           // POOL_FAIR_WINDOW_MS (D-F2 rolling window)
+	fairTopK       int           // POOL_FAIR_TOPK (D-F3 selection window)
+	batchWeight    float64       // POOL_BATCH_WEIGHT (D-H1 batch consumption weight)
+	batchExpiry    time.Duration // POOL_BATCH_EXPIRY_MS (D-H1 batch job expiry)
+	contIdleMS     time.Duration // POOL_CONT_IDLE_MS (D-E2 skip window)
+	contPreferMS   time.Duration // POOL_CONT_PREFER_MS (D-E2 soft preference)
+	purge          Purger
+	bodyReady      func(jobID string) bool // e2e fix: gates offerNext on the staged body
 
 	log func(format string, args ...any)
 
 	jobs map[string]*jobState
-	in chan dispatchOp
+	in   chan dispatchOp
 
-	wg sync.WaitGroup
+	wg       sync.WaitGroup
 	stopChan chan struct{}
 	doneChan chan struct{}
 }
 
 // Opts tunes the dispatcher; zero values take the config defaults.
 type Opts struct {
-	MaxBounces int
+	MaxBounces     int
 	LeaseDefaultMS int
 	// e2e fix: BodyReady reports whether the origin has staged the job's body
 	// file. A job is only offerable once the body is staged (catalog: "the
@@ -211,6 +221,12 @@ type Opts struct {
 	// FairTopK is the D-F3 selection window (POOL_FAIR_TOPK): the k oldest
 	// pending jobs the fairness pick considers; 0 takes the default (10).
 	FairTopK int
+	// BatchWeight is the D-F2 weight of a batch job's consumed tokens
+	// (POOL_BATCH_WEIGHT); 0 takes the default (0.5).
+	BatchWeight float64
+	// BatchExpiryMS caps pending/offered batch jobs in ms (POOL_BATCH_EXPIRY_MS);
+	// 0 takes the default (24h).
+	BatchExpiryMS int
 	// ParkBackoffMS is the base parked-job re-offer backoff in ms
 	// (POOL_PARK_BACKOFF_MS); 0 takes the default (500ms).
 	ParkBackoffMS int
@@ -244,6 +260,12 @@ func (o Opts) withDefaults() Opts {
 	if o.ParkBackoffMS <= 0 {
 		o.ParkBackoffMS = config.DefaultParkBackoffMS
 	}
+	if o.BatchWeight <= 0 {
+		o.BatchWeight = config.DefaultBatchWeight
+	}
+	if o.BatchExpiryMS <= 0 {
+		o.BatchExpiryMS = config.DefaultBatchExpiryMS
+	}
 	return o
 }
 
@@ -252,20 +274,22 @@ func New(db *pooldb.DB, hub RouterHub, opts Opts, purge Purger) *Dispatcher {
 	opts = opts.withDefaults()
 	return &Dispatcher{
 		db: db, hub: hub,
-		maxBounces: opts.MaxBounces,
+		maxBounces:     opts.MaxBounces,
 		leaseDefaultMS: opts.LeaseDefaultMS,
-		jobExpiry: time.Duration(opts.JobExpiryMS) * time.Millisecond,
-		runningCap: time.Duration(opts.RunningCapMS) * time.Millisecond,
-		parkBackoff:  time.Duration(opts.ParkBackoffMS) * time.Millisecond,
-		fairWindowMS: opts.FairWindowMS,
-		fairTopK:     opts.FairTopK,
-		contIdleMS: time.Duration(opts.ContIdleMS) * time.Millisecond, contPreferMS: time.Duration(opts.ContPreferMS) * time.Millisecond,
-		purge: purge,
+		jobExpiry:      time.Duration(opts.JobExpiryMS) * time.Millisecond,
+		runningCap:     time.Duration(opts.RunningCapMS) * time.Millisecond,
+		parkBackoff:    time.Duration(opts.ParkBackoffMS) * time.Millisecond,
+		fairWindowMS:   opts.FairWindowMS,
+		fairTopK:       opts.FairTopK,
+		batchWeight:    opts.BatchWeight,
+		batchExpiry:    time.Duration(opts.BatchExpiryMS) * time.Millisecond,
+		contIdleMS:     time.Duration(opts.ContIdleMS) * time.Millisecond, contPreferMS: time.Duration(opts.ContPreferMS) * time.Millisecond,
+		purge:     purge,
 		bodyReady: opts.BodyReady,
-		jobs: make(map[string]*jobState),
-		in: make(chan dispatchOp, 64),
-		stopChan: make(chan struct{}),
-		doneChan: make(chan struct{}),
+		jobs:      make(map[string]*jobState),
+		in:        make(chan dispatchOp, 64),
+		stopChan:  make(chan struct{}),
+		doneChan:  make(chan struct{}),
 	}
 }
 
@@ -333,6 +357,46 @@ func (d *Dispatcher) enqueue(op dispatchOp) error {
 // the intake handler right after the insert.
 func (d *Dispatcher) Register(jobID string) error {
 	return d.enqueue(dispatchOp{kind: opRegister, jobID: jobID})
+}
+
+// Reload rebuilds the in-memory job table from queue_jobs (D-H2). Called once
+// at startup, after the dispatcher goroutine is running: pending jobs resume
+// the offer loop (their bodies are on disk; the BodyReady gate already handles
+// a body not staged yet), and jobs that were offered or running when the
+// process died terminal-fail with coordinator_restart (their lease and relay
+// are dead). Returns (resumed, failed, error).
+func (d *Dispatcher) Reload() (int, int, error) {
+	ctx := context.Background()
+	pending, err := d.db.Query(ctx, "select id from queue_jobs where status = 'pending' order by created_at")
+	if err != nil {
+		return 0, 0, fmt.Errorf("dispatch reload: %w", err)
+	}
+	dead, err := d.db.Query(ctx, "select id from queue_jobs where status in ('offered', 'running') order by created_at")
+	if err != nil {
+		return 0, 0, fmt.Errorf("dispatch reload: %w", err)
+	}
+	resumed, failed := 0, 0
+	for _, row := range pending {
+		if err := d.enqueue(dispatchOp{kind: opRegister, jobID: strings.Split(row, ",")[0]}); err != nil {
+			return resumed, failed, fmt.Errorf("dispatch reload register %s: %w", row, err)
+		}
+		resumed++
+	}
+	for _, row := range dead {
+		if err := d.enqueue(dispatchOp{kind: opRestartFail, jobID: strings.Split(row, ",")[0]}); err != nil {
+			return resumed, failed, fmt.Errorf("dispatch reload restart-fail %s: %w", row, err)
+		}
+		failed++
+	}
+	d.logf("dispatch: reload: %d pending job(s) resumed, %d in-flight job(s) failed coordinator_restart (D-H2)", resumed, failed)
+	return resumed, failed, nil
+}
+
+// DropMemory clears the in-memory job table. Test seam for D-H2: it simulates
+// the process restart, after which Reload must rebuild the table from
+// queue_jobs. Not part of the service lifecycle.
+func (d *Dispatcher) DropMemory() error {
+	return d.enqueue(dispatchOp{kind: opDropMemory})
 }
 
 // OfferAccepted handles an offer_accept event (D-D2): the current candidate
@@ -411,10 +475,18 @@ func (d *Dispatcher) sweep() {
 		}
 	}
 
-	// Job expiry (MVP constant): pending/offered jobs older than the cap fail.
+	// Job expiry: pending/offered jobs older than the cap fail. Batch jobs get
+	// the longer POOL_BATCH_EXPIRY_MS (D-H1); live keeps POOL_JOB_EXPIRY_MS.
 	for _, j := range d.jobs {
-		if (j.Status == stPending || j.Status == stOffered) && now.Sub(j.CreatedAt) > d.jobExpiry {
-			d.failJob(j, poolproto.ErrorOther, fmt.Sprintf("job expired after %s (D-D2 MVP)", d.jobExpiry),
+		if j.Status != stPending && j.Status != stOffered {
+			continue
+		}
+		expiry := d.jobExpiry
+		if jobPriority(j) == poolproto.PriorityBatch {
+			expiry = d.batchExpiry
+		}
+		if now.Sub(j.CreatedAt) > expiry {
+			d.failJob(j, poolproto.ErrorOther, fmt.Sprintf("job expired after %s (D-D2 MVP)", expiry),
 				0, 0, int(now.Sub(j.CreatedAt).Milliseconds()), 0)
 		}
 	}
@@ -461,17 +533,27 @@ func (d *Dispatcher) sweep() {
 	}
 }
 
-// pickFair returns the pending job to offer next (or nil): warm-continuation
-// jobs (isWarm) before the rest (D-E2 skip-the-line), and for the rest the
-// D-F3 fairness pick: among the topK oldest eligible jobs, the user with the
-// highest D-F2 ratio is served, at their oldest job in the window (per-user
-// FIFO - a user's jobs never reorder relative to each other). Jobs parked
-// until NextOfferAt are not eligible in either group.
+// pickFair returns the pending job to offer next (or nil). Batches are always
+// lower priority than live requests (D-H1): a pending live job is always
+// offered before any batch job. Inside each priority group the pick is the
+// same: warm-continuation jobs (isWarm) before the rest (D-E2 skip-the-line),
+// and for the rest the D-F3 fairness pick - among the topK oldest eligible
+// jobs, the user with the highest D-F2 ratio is served, at their oldest job
+// in the window (per-user FIFO - a user's jobs never reorder relative to each
+// other). Jobs parked until NextOfferAt are not eligible in either group.
 func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) bool, topK int, ratios func([]string) map[string]float64) *jobState {
+	if p := pickPriority(jobs, now, isWarm, topK, ratios, poolproto.PriorityLive); p != nil {
+		return p
+	}
+	return pickPriority(jobs, now, isWarm, topK, ratios, poolproto.PriorityBatch)
+}
+
+// pickPriority is the offer pick restricted to one priority group.
+func pickPriority(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) bool, topK int, ratios func([]string) map[string]float64, priority string) *jobState {
 	var warmPick *jobState
 	var eligible []*jobState
 	for _, j := range jobs {
-		if j.Status != stPending {
+		if j.Status != stPending || jobPriority(j) != priority {
 			continue
 		}
 		t := j.NextOfferAt
@@ -524,6 +606,16 @@ func pickFair(jobs map[string]*jobState, now time.Time, isWarm func(*jobState) b
 	return best
 }
 
+// jobPriority is the offer-priority group of a job: a batch job (the D-H1
+// lower group) when queue_jobs.priority = 'batch', live otherwise (a missing
+// priority counts as live; the intake requires live|batch).
+func jobPriority(j *jobState) string {
+	if j.Priority == poolproto.PriorityBatch {
+		return poolproto.PriorityBatch
+	}
+	return poolproto.PriorityLive
+}
+
 // fairRatio looks up a user's D-F2 priority; absent = the (0+1)/(0+1) = 1.0
 // baseline (new member, or an empty window).
 func fairRatio(r map[string]float64, user string) float64 {
@@ -565,24 +657,34 @@ func (d *Dispatcher) fairRatios(users []string) map[string]float64 {
 	in := strings.Join(ids, ", ")
 	cutoff := fmt.Sprintf("now() - interval '%d milliseconds'", d.fairWindowMS)
 	served := d.fairSum(cutoff, in, `left join routers r on r.owner_id = u.id
-left join records rec on rec.router_id = r.id and rec.ok and rec.created_at >= `)
-	consumed := d.fairSum(cutoff, in, `left join records rec on rec.user_id = u.id and rec.ok and rec.created_at >= `)
+left join records rec on rec.router_id = r.id and rec.ok and rec.created_at >= `, `rec.response_tokens`)
+	consumed := d.fairSum(cutoff, in, `left join records rec on rec.user_id = u.id and rec.ok and rec.created_at >= `,
+		batchConsumedExpr(d.batchWeight))
 	for _, u := range users {
 		ratios[u] = (served[u] + 1) / (consumed[u] + 1)
 	}
 	return ratios
 }
 
+// batchConsumedExpr renders the D-F2 consumed-side sum with the batch discount
+// (D-H1): a batch job's response tokens count at POOL_BATCH_WEIGHT, a live
+// job's at 1 (serving a batch job still counts in full on the served side).
+func batchConsumedExpr(weight float64) string {
+	return fmt.Sprintf("rec.response_tokens * (case when rec.priority = 'batch' then %s else 1 end)",
+		strconv.FormatFloat(weight, 'f', -1, 64))
+}
+
 // fairSum runs one D-F2 aggregate (the join clause selects the served or
-// consumed side) and returns user_id -> response-token sum (missing = 0).
-func (d *Dispatcher) fairSum(cutoff, in, join string) map[string]float64 {
+// consumed side, expr is the summed column) and returns user_id -> sum
+// (missing = 0).
+func (d *Dispatcher) fairSum(cutoff, in, join, expr string) map[string]float64 {
 	out := map[string]float64{}
 	query := fmt.Sprintf(`
-select u.id::text, coalesce(sum(rec.response_tokens), 0)
+select u.id::text, coalesce(sum(%s), 0)
 from users u
 %s %s
 where u.id in (%s)
-group by u.id`, join, cutoff, in)
+group by u.id`, expr, join, cutoff, in)
 	rows, err := d.db.Query(context.Background(), query)
 	if err != nil {
 		d.logf("dispatch: fairness ratio query: %v", err)
@@ -619,7 +721,7 @@ func beforeInLine(a, b *jobState) bool {
 // candidate is one dispatch candidate for a job.
 type candidate struct {
 	routerID, routerName, modelID string
-	nCtx, nSlots, busySlots int
+	nCtx, nSlots, busySlots       int
 }
 
 // selectCandidates returns the ordered, connected, de-duplicated candidates for j:
@@ -962,6 +1064,11 @@ func (d *Dispatcher) applyOp(op dispatchOp) {
 		d.internalReject(op, op.errOut)
 	case opContEvicted:
 		d.contEvicted(op, op.errOut)
+	case opRestartFail:
+		d.restartFail(op.jobID, op.errOut)
+	case opDropMemory:
+		d.jobs = make(map[string]*jobState)
+		d.ack(op.errOut, nil)
 	}
 }
 
@@ -1001,7 +1108,7 @@ from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 		EstPromptTokens: atoiCell(f[3]), EstCtxNeeded: atoiCell(f[4]),
 		ConvKey: f[5], Status: f[6],
 		OriginRouter: f[7],
-		CreatedAt: created, UserCreatedAt: created,
+		CreatedAt:    created, UserCreatedAt: created,
 	}
 	if err := d.fixUserCreatedAt(d.jobs[jobID]); err != nil {
 		d.logf("dispatch: fix user created_at for job %s: %v", jobID, err)
@@ -1069,7 +1176,7 @@ func (d *Dispatcher) accept(op dispatchOp, errOut chan error) {
 	}
 	j.LeaseExpiresAt = time.Now().Add(time.Duration(lease) * time.Millisecond)
 	j.AcceptedAt = time.Now() // body pull + response push now allowed (review H2)
-	j.ParkCount = 0            // the streak of consecutive parks is broken
+	j.ParkCount = 0           // the streak of consecutive parks is broken
 	d.persistStatus(j, stOffered)
 	d.logf("dispatch: job %s accepted by %s; lease %dms", j.JobID, short(j.CurrentCandidate), lease)
 }
@@ -1343,7 +1450,7 @@ func (d *Dispatcher) failJob(j *jobState, code, message string, pt, rt, tq, ts i
 	if j.OriginRouter != "" {
 		env := poolproto.Event{Type: poolproto.TypeError, Payload: mustJSON(poolproto.ErrorReport{
 			JobID: j.JobID, OK: false, Stage: poolproto.StageMidStream, Code: code,
-			Message: message,
+			Message:      message,
 			PromptTokens: ptrInt(pt), ResponseTokens: ptrInt(rt),
 			ConvKey: convKeyPtr(j.ConvKey), TQueuedMS: ptrInt(tq), TServiceMS: ptrInt(ts),
 		})}
@@ -1441,6 +1548,42 @@ func (d *Dispatcher) internalReject(op dispatchOp, errOut chan error) {
 	if j.Status == stOffered {
 		d.offerNext(j)
 	}
+}
+
+// restartFail terminal-fails a job that was offered or running when the
+// coordinator restarted (D-H2): its lease and relay are dead. The records row,
+// the origin mirror, and the body purge run exactly as for any other terminal
+// (code coordinator_restart).
+func (d *Dispatcher) restartFail(jobID string, errOut chan error) {
+	defer d.ack(errOut, nil)
+	rows, err := d.db.Query(context.Background(), fmt.Sprintf(`
+select user_id, class_id, priority, status, conv_key, originating_router_id, serving_router_id, created_at
+from queue_jobs where id = %s`, pooldb.UUID(jobID)))
+	if err != nil {
+		d.ack(errOut, fmt.Errorf("dispatch restart-fail %s: %w", jobID, err))
+		return
+	}
+	if len(rows) == 0 {
+		d.ack(errOut, nil) // raced: another terminal landed first
+		return
+	}
+	f := strings.Split(rows[0], ",")
+	if len(f) < 8 {
+		d.ack(errOut, fmt.Errorf("dispatch: bad job row %s: %q", jobID, rows[0]))
+		return
+	}
+	created, perr := parseTS(f[7])
+	if perr != nil {
+		d.ack(errOut, fmt.Errorf("dispatch restart-fail %s: %w", jobID, perr))
+		return
+	}
+	j := &jobState{JobID: jobID, UserID: f[0], Tag: f[1], Priority: f[2],
+		ConvKey: f[4], OriginRouter: f[5], ServingRouterID: f[6],
+		Status: f[3], CreatedAt: created, UserCreatedAt: created}
+	d.jobs[jobID] = j
+	d.failJob(j, codeCoordinatorRestart,
+		"coordinator restarted while the job was in flight; its lease and relay are dead (D-H2)",
+		0, 0, int(time.Since(created).Milliseconds()), 0)
 }
 
 func (d *Dispatcher) contEvicted(op dispatchOp, errOut chan error) {

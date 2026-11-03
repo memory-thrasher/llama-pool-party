@@ -3,6 +3,8 @@ package dispatch
 import (
 	"testing"
 	"time"
+
+	"pool-coordinator/protocol/go/poolproto"
 )
 
 // TestPickFair_WarmHint pins the D-E2 skip-the-line pick ordering: a
@@ -85,6 +87,77 @@ func TestPickFair_WarmHint(t *testing.T) {
 				t.Fatalf("pickFair = %v, want %q", got, tc.want)
 			}
 			if got != nil && got.JobID != tc.want {
+				t.Fatalf("pickFair = %q, want %q", got.JobID, tc.want)
+			}
+		})
+	}
+}
+
+// TestPickFair_LiveBeforeBatch pins the D-H1 priority grouping: a pending
+// live job is always offered before any batch job (even an older one); the
+// batch group is picked only when no live job is pending, and the per-user
+// FIFO inside a group is unchanged.
+func TestPickFair_LiveBeforeBatch(t *testing.T) {
+	now := time.Now()
+	user := now.Add(-time.Hour)
+	mk := func(id, priority string, created time.Time) *jobState {
+		return &jobState{JobID: id, UserID: "u", Priority: priority, Status: stPending,
+			CreatedAt: created, UserCreatedAt: user}
+	}
+	cases := []struct {
+		name string
+		jobs map[string]*jobState
+		want string
+	}{
+		{
+			name: "older batch job loses to a newer live job",
+			jobs: map[string]*jobState{
+				"batch": mk("batch", poolproto.PriorityBatch, now.Add(-5*time.Second)),
+				"live":  mk("live", poolproto.PriorityLive, now.Add(-1*time.Second)),
+			},
+			want: "live",
+		},
+		{
+			name: "no live job: the batch job is picked",
+			jobs: map[string]*jobState{
+				"batch": mk("batch", poolproto.PriorityBatch, now.Add(-5*time.Second)),
+			},
+			want: "batch",
+		},
+		{
+			name: "batch group keeps its own FIFO",
+			jobs: map[string]*jobState{
+				"old": mk("old", poolproto.PriorityBatch, now.Add(-5*time.Second)),
+				"new": mk("new", poolproto.PriorityBatch, now.Add(-1*time.Second)),
+			},
+			want: "old",
+		},
+		{
+			name: "live group keeps its own FIFO",
+			jobs: map[string]*jobState{
+				"l1": mk("l1", poolproto.PriorityLive, now.Add(-5*time.Second)),
+				"l2": mk("l2", poolproto.PriorityLive, now.Add(-1*time.Second)),
+			},
+			want: "l1",
+		},
+		{
+			name: "parked live job: the batch job still waits behind the unparked live job",
+			jobs: map[string]*jobState{
+				"batch":  mk("batch", poolproto.PriorityBatch, now.Add(-5*time.Second)),
+				"parked": {JobID: "parked", UserID: "u", Priority: poolproto.PriorityLive, Status: stPending, CreatedAt: now.Add(-4 * time.Second), UserCreatedAt: user, NextOfferAt: now.Add(time.Second)},
+				"live":   mk("live", poolproto.PriorityLive, now.Add(-1*time.Second)),
+			},
+			want: "live",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pickFair(tc.jobs, now, func(*jobState) bool { return false }, 10,
+				func([]string) map[string]float64 { return map[string]float64{} })
+			if got == nil {
+				t.Fatalf("pickFair = nil, want %q", tc.want)
+			}
+			if got.JobID != tc.want {
 				t.Fatalf("pickFair = %q, want %q", got.JobID, tc.want)
 			}
 		})

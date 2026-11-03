@@ -30,15 +30,15 @@ import (
 // Server is the HTTP plane. It owns the subscribe sessions, the response-relay
 // pipes, and the dispatch engine. Start it with Run.
 type Server struct {
-	cfg config.Config
-	db  *pooldb.DB
+	cfg  config.Config
+	db   *pooldb.DB
 	disp *dispatch.Dispatcher
 	logs io.Writer
 
 	dataDir string
 
 	// mu guards subs.
-	mu  sync.Mutex
+	mu   sync.Mutex
 	subs map[string]*session
 
 	// pipesMu guards pipes.
@@ -60,8 +60,8 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 	s := &Server{
 		cfg: cfg, db: db, logs: logs,
 		dataDir: dataDir,
-		subs: make(map[string]*session),
-		pipes: make(map[string]*relayPipe),
+		subs:    make(map[string]*session),
+		pipes:   make(map[string]*relayPipe),
 	}
 	// e2e fix: a job becomes offerable only once the origin has staged its body
 	// (catalog: "queued when the body PUT completes"). Without this the 1s sweep
@@ -73,7 +73,8 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 	opts := dispatch.Opts{MaxBounces: cfg.MaxBounces, LeaseDefaultMS: cfg.OfferLeaseMS,
 		ContIdleMS: cfg.ContIdleMS, ContPreferMS: cfg.ContPreferMS,
 		JobExpiryMS: cfg.JobExpiryMS, RunningCapMS: cfg.RunningCapMS, BodyReady: bodyReady,
-		FairWindowMS: cfg.FairWindowMS, FairTopK: cfg.FairTopK, ParkBackoffMS: cfg.ParkBackoffMS}
+		FairWindowMS: cfg.FairWindowMS, FairTopK: cfg.FairTopK, ParkBackoffMS: cfg.ParkBackoffMS,
+		BatchWeight: cfg.BatchWeight, BatchExpiryMS: cfg.BatchExpiryMS}
 	s.disp = dispatch.New(db, s, opts, s.purgeBody)
 	return s
 }
@@ -115,6 +116,13 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Run(ctx context.Context, addr string) error {
 	s.disp.SetLogger(s.logf)
 	s.disp.Start(ctx)
+	// D-H2: the queue is durable - pending jobs resume the offer loop after a
+	// restart (their bodies are on disk), in-flight jobs terminal-fail.
+	if resumed, failed, err := s.disp.Reload(); err != nil {
+		s.logf("dispatch: startup reload: %v", err)
+	} else {
+		s.logf("dispatch: startup reload: %d resumed, %d coordinator_restart", resumed, failed)
+	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -122,7 +130,7 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	}
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:          s.Handler(),
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -261,12 +269,12 @@ const maxSessionBuf = 4096
 // The long-poll reader waits on the notify signal with a timeout. A second
 // connection replaces the first (MVP).
 type session struct {
-	routerID   string
-	mu         sync.Mutex
-	items      []string
-	notify     chan struct{} // buffered 1; signaled on push
-	closed     chan struct{}
-	closeOnce   sync.Once
+	routerID  string
+	mu        sync.Mutex
+	items     []string
+	notify    chan struct{} // buffered 1; signaled on push
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func (s *Server) registerSession(routerID string) *session {
@@ -435,16 +443,16 @@ func (s *Server) removePipe(jobID string) {
 
 // jobRow loads a queue_jobs row by id; ok=false when the job is unknown.
 type jobRow struct {
-	ID string
-	UserID string
-	Tag string
-	Status string
-	RequestID string
-	OriginRouter string
+	ID            string
+	UserID        string
+	Tag           string
+	Status        string
+	RequestID     string
+	OriginRouter  string
 	ServingRouter string
-	AcceptedAt string // "" = not accepted (gates body pull / response push)
-	ConvKey string
-	CreatedAt string
+	AcceptedAt    string // "" = not accepted (gates body pull / response push)
+	ConvKey       string
+	CreatedAt     string
 }
 
 func (s *Server) jobRow(ctx context.Context, jobID string) (jobRow, bool) {

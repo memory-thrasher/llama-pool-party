@@ -41,7 +41,9 @@ type OfferPolicy interface {
 // AcceptPolicy accepts every offer.
 type AcceptPolicy struct{}
 
-func (AcceptPolicy) Decide(offer poolproto.WorkOffer) OfferDecision { return OfferDecision{Accept: true} }
+func (AcceptPolicy) Decide(offer poolproto.WorkOffer) OfferDecision {
+	return OfferDecision{Accept: true}
+}
 
 // RejectPolicy rejects every offer with a fixed reason.
 type RejectPolicy struct{ Reason string }
@@ -53,8 +55,8 @@ func (p RejectPolicy) Decide(offer poolproto.WorkOffer) OfferDecision {
 // CountingPolicy wraps a policy and counts the calls.
 type CountingPolicy struct {
 	Base  OfferPolicy
-	Calls  int
-	mu     sync.Mutex
+	Calls int
+	mu    sync.Mutex
 }
 
 func (p *CountingPolicy) Decide(offer poolproto.WorkOffer) OfferDecision {
@@ -117,8 +119,8 @@ func randUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func (fr *FakeRouter) ID() string       { return fr.id }
-func (fr *FakeRouter) Name() string     { return fr.name }
+func (fr *FakeRouter) ID() string   { return fr.id }
+func (fr *FakeRouter) Name() string { return fr.name }
 
 // SetPolicy installs the router's offer policy.
 func (fr *FakeRouter) SetPolicy(p OfferPolicy) {
@@ -139,7 +141,7 @@ func (fr *FakeRouter) LoadModel(modelID string, tags []string, nCtx, nSlots, bus
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 	fr.models = append(fr.models, poolproto.ModelEntry{
-		ModelID:    modelID,
+		ModelID:   modelID,
 		Tags:      tags,
 		NCtx:      nCtx,
 		NSlots:    nSlots,
@@ -159,9 +161,9 @@ func (fr *FakeRouter) Connect(ctx context.Context) error {
 	if err := fr.postEvent(ctx, poolproto.TypeHandshake, &poolproto.Handshake{
 		Proto:      1,
 		RouterID:   fr.id,
-		RouterName:  fr.name,
-		Software: "fake-router/1.0",
-		Models:    models,
+		RouterName: fr.name,
+		Software:   "fake-router/1.0",
+		Models:     models,
 	}); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
@@ -289,16 +291,29 @@ func (fr *FakeRouter) IntakeNoBody(ctx context.Context, reqID, tag string, estPr
 	return jobID, err
 }
 
+// IntakeNoBodyBatch posts a priority=batch metadata intake (D-H1 async
+// batch); as with IntakeNoBody the body is staged separately.
+func (fr *FakeRouter) IntakeNoBodyBatch(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string) (string, error) {
+	jobID, _, err := fr.IntakeMetaP(ctx, reqID, tag, estPrompt, estCtx, convKey, poolproto.PriorityBatch)
+	return jobID, err
+}
+
 // IntakeMeta posts the metadata intake (POST /pool/jobs) and returns the job
 // id and the HTTP status: 201 = fresh job, 200 = in-window dedupe of a retry
 // (D-G5). The body is not staged.
 func (fr *FakeRouter) IntakeMeta(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string) (string, int, error) {
+	return fr.IntakeMetaP(ctx, reqID, tag, estPrompt, estCtx, convKey, poolproto.PriorityLive)
+}
+
+// IntakeMetaP posts the metadata intake with an explicit priority (the intake
+// requires live|batch).
+func (fr *FakeRouter) IntakeMetaP(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string, priority string) (string, int, error) {
 	ji := poolproto.JobIntake{
 		RequestID:       reqID,
 		Tag:             tag,
 		EstPromptTokens: estPrompt,
 		EstCtxNeeded:    estCtx,
-		Priority:        poolproto.PriorityLive,
+		Priority:        priority,
 	}
 	if convKey != nil {
 		ji.ConvKey = convKey
@@ -450,10 +465,10 @@ func (fr *FakeRouter) AcceptAndServe(ctx context.Context, jobID string, bodyByte
 		return err
 	}
 	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
-		JobID:    jobID,
-		LeaseMS:   5000,
-		ModelID:   modelID,
-		NCtx:     nCtx,
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
 	}); err != nil {
 		return fmt.Errorf("offer_accept: %w", err)
 	}
@@ -494,18 +509,18 @@ func (fr *FakeRouter) AcceptAndServe(ctx context.Context, jobID string, bodyByte
 
 	// Report completion (D-D6).
 	return fr.postEvent(ctx, poolproto.TypeCompletion, &poolproto.Completion{
-		JobID:        jobID,
-		OK:          true,
-		ConvKey:      &convKey,
-		ModelID:       modelID,
-		PromptTokens: 128,
+		JobID:          jobID,
+		OK:             true,
+		ConvKey:        &convKey,
+		ModelID:        modelID,
+		PromptTokens:   128,
 		ResponseTokens: len(ndjson),
-		CachedTokens:  intPtr(0),
-		IdleMSHint:   intPtr(0),
-		TQueuedMS:     1,
-		TServiceMS:    2,
-		StopReason:   strPtr("finish_reason"),
-		ServedBy:    fr.id,
+		CachedTokens:   intPtr(0),
+		IdleMSHint:     intPtr(0),
+		TQueuedMS:      1,
+		TServiceMS:     2,
+		StopReason:     strPtr("finish_reason"),
+		ServedBy:       fr.id,
 	})
 }
 
@@ -687,10 +702,10 @@ func (fr *FakeRouter) StreamResponse(ctx context.Context, jobID string, ndjson [
 		return err
 	}
 	if err := fr.postEvent(ctx, poolproto.TypeOfferAccept, &poolproto.OfferAccept{
-		JobID:    jobID,
-		LeaseMS:  5000,
-		ModelID:   modelID,
-		NCtx:     nCtx,
+		JobID:   jobID,
+		LeaseMS: 5000,
+		ModelID: modelID,
+		NCtx:    nCtx,
 	}); err != nil {
 		return fmt.Errorf("offer_accept: %w", err)
 	}
@@ -863,6 +878,5 @@ func hexToken(n int) string {
 	return hex.EncodeToString(b)
 }
 
-
-func intPtr(v int) *int { return &v }
+func intPtr(v int) *int       { return &v }
 func strPtr(v string) *string { return &v }
