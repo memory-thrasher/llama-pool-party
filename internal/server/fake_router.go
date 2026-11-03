@@ -285,12 +285,20 @@ func (fr *FakeRouter) Intake(ctx context.Context, reqID, tag string, estPrompt, 
 // never staged, so the job is not offerable (dispatch body gate) until
 // StageBody is called. Test hook for queue-ordering tests.
 func (fr *FakeRouter) IntakeNoBody(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string) (string, error) {
+	jobID, _, err := fr.IntakeMeta(ctx, reqID, tag, estPrompt, estCtx, convKey)
+	return jobID, err
+}
+
+// IntakeMeta posts the metadata intake (POST /pool/jobs) and returns the job
+// id and the HTTP status: 201 = fresh job, 200 = in-window dedupe of a retry
+// (D-G5). The body is not staged.
+func (fr *FakeRouter) IntakeMeta(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string) (string, int, error) {
 	ji := poolproto.JobIntake{
-		RequestID:      reqID,
-		Tag:            tag,
+		RequestID:       reqID,
+		Tag:             tag,
 		EstPromptTokens: estPrompt,
-		EstCtxNeeded:   estCtx,
-		Priority:       poolproto.PriorityLive,
+		EstCtxNeeded:    estCtx,
+		Priority:        poolproto.PriorityLive,
 	}
 	if convKey != nil {
 		ji.ConvKey = convKey
@@ -298,14 +306,14 @@ func (fr *FakeRouter) IntakeNoBody(ctx context.Context, reqID, tag string, estPr
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fr.baseURL+"/pool/jobs",
 		bytes.NewReader(jsonBytes(ji)))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+fr.token)
 	req.Header.Set("X-Pool-Router-Id", fr.id)
 	resp, err := fr.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	var bodyResp struct {
 		JobID string `json:"job_id"`
@@ -314,9 +322,19 @@ func (fr *FakeRouter) IntakeNoBody(ctx context.Context, reqID, tag string, estPr
 	resp.Body.Close()
 	_ = json.Unmarshal(raw, &bodyResp)
 	if bodyResp.JobID == "" {
-		return "", fmt.Errorf("intake: empty job id: status %d: %s", resp.StatusCode, truncate(raw, 200))
+		return "", resp.StatusCode, fmt.Errorf("intake: empty job id: status %d: %s", resp.StatusCode, truncate(raw, 200))
 	}
-	return bodyResp.JobID, nil
+	return bodyResp.JobID, resp.StatusCode, nil
+}
+
+// PostExclusion posts an exclusion_update event (D-F1, catalog 3.10): the
+// owner marks a model excluded (true) or un-excluded (false) on this router.
+func (fr *FakeRouter) PostExclusion(ctx context.Context, modelID string, excluded bool) error {
+	return fr.postEvent(ctx, poolproto.TypeExclusionUpdate, &poolproto.ExclusionUpdate{
+		RouterID: fr.id,
+		ModelID:  modelID,
+		Excluded: excluded,
+	})
 }
 
 // StageBody PUTs the job body (D-D2: the coordinator treats the job as

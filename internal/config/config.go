@@ -55,6 +55,11 @@ const (
 	// job (POOL_PARK_BACKOFF_MS); it doubles per consecutive park, capped at
 	// ~10x the base (~5s at the default) (DISP-RESIDUAL-1).
 	DefaultParkBackoffMS = 500
+	// DefaultDedupeWindowMS is the intake dedupe window, ms (POOL_DEDUPE_WINDOW_MS,
+	// D-G5): a re-intake with the same (user_id, request_id) younger than this
+	// returns the existing job (200); beyond it the id is released and the
+	// prompt is fresh work (201).
+	DefaultDedupeWindowMS = 300000
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -92,6 +97,8 @@ type Config struct {
 	// ParkBackoffMS is the base parked-job re-offer backoff, ms
 	// (POOL_PARK_BACKOFF_MS).
 	ParkBackoffMS int
+	// DedupeWindowMS is the intake dedupe window, ms (POOL_DEDUPE_WINDOW_MS, D-G5).
+	DedupeWindowMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -120,6 +127,7 @@ func Load() (Config, error) {
 		FairWindowMS: atoi(env("POOL_FAIR_WINDOW_MS", ""), DefaultFairWindowMS),
 		FairTopK:     atoi(env("POOL_FAIR_TOPK", ""), DefaultFairTopK),
 		ParkBackoffMS: atoi(env("POOL_PARK_BACKOFF_MS", ""), DefaultParkBackoffMS),
+		DedupeWindowMS: atoi(env("POOL_DEDUPE_WINDOW_MS", ""), DefaultDedupeWindowMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)

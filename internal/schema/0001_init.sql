@@ -161,9 +161,12 @@ comment on column records.cont_reason is 'D-E6 denial reason: idle/gone/error/ev
 comment on table queue_jobs is 'Coordinator-owned job queue; fairness selection (WS-11) scans here.';
 create index if not exists queue_jobs_status_idx on queue_jobs (priority, status, created_at);
 
--- v1 amendment (pre-release): exact idempotency on intake (WS-06): same
--- request_id -> conflict -> return the existing job_id.
-create unique index if not exists queue_jobs_request_id_uq on queue_jobs (request_id) where request_id is not null;
+-- v1 amendment (pre-release, WS-12): the intake idempotency key (D-G5) is
+-- scoped to (user_id, request_id): a client retry with the same request_id
+-- dedupes, but an identical prompt from another user is fresh work (a global
+-- key would let one user's intake capture another's prompt).
+drop index if exists queue_jobs_request_id_uq;
+create unique index if not exists queue_jobs_request_user_uq on queue_jobs (user_id, request_id) where request_id is not null;
 
 
 

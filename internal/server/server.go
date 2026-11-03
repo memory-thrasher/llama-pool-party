@@ -54,6 +54,9 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 	if cfg.HeartbeatMS <= 0 {
 		cfg.HeartbeatMS = config.DefaultHeartbeatMS
 	}
+	if cfg.DedupeWindowMS <= 0 {
+		cfg.DedupeWindowMS = config.DefaultDedupeWindowMS
+	}
 	s := &Server{
 		cfg: cfg, db: db, logs: logs,
 		dataDir: dataDir,

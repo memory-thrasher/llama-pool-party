@@ -40,12 +40,13 @@ type e2eEnv struct {
 
 // e2eOpts tunes the test coordinator (zero = the config defaults).
 type e2eOpts struct {
-	contIdleMS    int
-	jobExpiryMS   int
-	runningCapMS  int
-	fairTopK      int
-	fairWindowMS  int
-	parkBackoffMS int
+	contIdleMS     int
+	jobExpiryMS    int
+	runningCapMS   int
+	fairTopK       int
+	fairWindowMS   int
+	parkBackoffMS  int
+	dedupeWindowMS int
 }
 
 func newE2E(t *testing.T) *e2eEnv {
@@ -82,7 +83,8 @@ func newE2EWith(t *testing.T, opts e2eOpts) *e2eEnv {
 	logs := &bytes.Buffer{}
 	cfg := config.Config{Addr: "127.0.0.1:0", DSN: baseDSN, DataDir: dataDir, LogLevel: "info",
 		ContIdleMS: opts.contIdleMS, JobExpiryMS: opts.jobExpiryMS, RunningCapMS: opts.runningCapMS,
-		FairTopK: opts.fairTopK, FairWindowMS: opts.fairWindowMS, ParkBackoffMS: opts.parkBackoffMS}
+		FairTopK: opts.fairTopK, FairWindowMS: opts.fairWindowMS, ParkBackoffMS: opts.parkBackoffMS,
+		DedupeWindowMS: opts.dedupeWindowMS}
 	srv := New(cfg, db, dataDir, logs)
 	srv.Dispatcher().SetLogger(srv.logf)
 	srv.Dispatcher().Start(context.Background())

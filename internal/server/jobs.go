@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"math"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +33,10 @@ const (
 // intake. The raw client body follows over PUT .../body. The originating
 // router is identified by the X-Pool-Router-Id header (additive contract
 // clarification, WS-06); it must exist and belong to the token's owner.
-// Idempotency: a repeat request_id returns the existing job_id (D-G5).
+// Idempotency (D-G5): a re-intake with the same (user_id, request_id) within
+// the dedupe window (POOL_DEDUPE_WINDOW_MS) returns the existing job_id with
+// 200; a fresh prompt, or one older than the window, is a new job (201).
+// The scope is per-user: an identical prompt from another user is fresh work.
 func (s *Server) handleIntake(w http.ResponseWriter, r *http.Request) {
 	userID, err := s.authUser(r)
 	if err != nil {
@@ -55,43 +60,107 @@ func (s *Server) handleIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Insert the job; a same-(user_id, request_id) conflict resolves below.
 	jobID := pooldb.NewUUID()
-	inserted := true
-	err = s.db.Exec(r.Context(), fmt.Sprintf(`
-insert into queue_jobs (id, user_id, class_id, priority, est_prompt_tokens, est_ctx_needed,
-                       conv_key, status, request_id, originating_router_id, created_at)
-values (%s, %s, %s, %s, %d, %d, %s, 'pending', %s, %s, now())
-on conflict (request_id) where request_id is not null do nothing`,
-		pooldb.UUID(jobID), pooldb.UUID(userID), pooldb.S(ji.Tag), pooldb.S(ji.Priority),
-		ji.EstPromptTokens, ji.EstCtxNeeded, optStr(ji.ConvKey),
-		pooldb.UUID(ji.RequestID), pooldb.UUID(routerID)))
-	if err != nil {
+	if err := s.insertJob(r.Context(), userID, routerID, ji, jobID); err != nil {
 		s.logf("intake: insert job: %v", err)
 		http.Error(w, "intake failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Idempotency: was it a conflict (existing job_id) or a fresh insert?
-	existing, _ := s.db.FirstString(r.Context(), fmt.Sprintf(
-		"select id from queue_jobs where id = %s", pooldb.UUID(jobID)))
-	if existing == "" {
-		existing, _ = s.db.FirstString(r.Context(), fmt.Sprintf(
-			"select id from queue_jobs where request_id = %s", pooldb.UUID(ji.RequestID)))
-		if existing == "" {
-			http.Error(w, "intake failed: no job", http.StatusInternalServerError)
-			return
-		}
-		jobID = existing
-		inserted = false
-	}
+	inserted, _ := s.db.FirstBool(r.Context(),
+		"select 1 from queue_jobs where id = "+pooldb.UUID(jobID))
 	if inserted {
 		// Fresh job: hand it to the dispatcher.
 		if err := s.disp.Register(jobID); err != nil {
 			s.logf("intake: register job %s: %v", jobID, err)
 		}
+		s.logf("intake: user %s router %s tag %s -> job %s (request_id %s)",
+			short(userID), short(routerID), ji.Tag, jobID, short(ji.RequestID))
+		writeJSON(w, http.StatusCreated, map[string]string{"job_id": jobID})
+		return
 	}
-	s.logf("intake: user %s router %s tag %s -> job %s (request_id %s)",
-		short(userID), short(routerID), ji.Tag, jobID, short(ji.RequestID))
-	writeJSON(w, http.StatusCreated, map[string]string{"job_id": jobID})
+
+	// Conflict: a job with the same (user, request_id) already exists. The
+	// dedupe window (POOL_DEDUPE_WINDOW_MS) decides: within it this is a retry
+	// of an accepted request (return the existing job, 200); beyond it the id
+	// is released and the prompt is new work (fresh insert, 201).
+	existingID, ageMS, ok := s.dedupeExisting(r.Context(), userID, ji.RequestID)
+	if !ok {
+		http.Error(w, "intake failed: no job", http.StatusInternalServerError)
+		return
+	}
+	if ageMS < int64(s.cfg.DedupeWindowMS) {
+		s.logf("intake: dedupe user %s request_id %s -> job %s (age %dms < %dms)",
+			short(userID), short(ji.RequestID), existingID, ageMS, s.cfg.DedupeWindowMS)
+		writeJSON(w, http.StatusOK, map[string]string{"job_id": existingID})
+		return
+	}
+
+	// Beyond the window: release the id (guarded so a just-young row is never
+	// released) and re-intake the prompt as fresh work. The released row keeps
+	// its history; its records row is untouched.
+	_ = s.db.Exec(r.Context(), fmt.Sprintf(`
+update queue_jobs set request_id = null where id = %s and user_id = %s
+  and created_at < now() - interval '1 millisecond' * %d`,
+		pooldb.UUID(existingID), pooldb.UUID(userID), s.cfg.DedupeWindowMS))
+	newJobID := pooldb.NewUUID()
+	if err := s.insertJob(r.Context(), userID, routerID, ji, newJobID); err != nil {
+		s.logf("intake: re-insert job: %v", err)
+		http.Error(w, "intake failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	reinserted, _ := s.db.FirstBool(r.Context(),
+		"select 1 from queue_jobs where id = "+pooldb.UUID(newJobID))
+	if !reinserted {
+		// Raced: another intake grabbed the id between the release and insert;
+		// return the winner.
+		if rid, _, ok2 := s.dedupeExisting(r.Context(), userID, ji.RequestID); ok2 {
+			s.logf("intake: re-insert raced, returning existing job %s", rid)
+			writeJSON(w, http.StatusOK, map[string]string{"job_id": rid})
+			return
+		}
+		http.Error(w, "intake failed: no job", http.StatusInternalServerError)
+		return
+	}
+	if err := s.disp.Register(newJobID); err != nil {
+		s.logf("intake: register job %s: %v", newJobID, err)
+	}
+	s.logf("intake: window expired, re-intake user %s request_id %s -> job %s (age %dms)",
+		short(userID), short(ji.RequestID), newJobID, ageMS)
+	writeJSON(w, http.StatusCreated, map[string]string{"job_id": newJobID})
+}
+
+// insertJob stages one queue_jobs row (metadata only; the body follows over
+// PUT .../body). A same-(user_id, request_id) conflict is a no-op (D-G5).
+func (s *Server) insertJob(ctx context.Context, userID, routerID string, ji poolproto.JobIntake, jobID string) error {
+	return s.db.Exec(ctx, fmt.Sprintf(`
+insert into queue_jobs (id, user_id, class_id, priority, est_prompt_tokens, est_ctx_needed,
+                       conv_key, status, request_id, originating_router_id, created_at)
+values (%s, %s, %s, %s, %d, %d, %s, 'pending', %s, %s, now())
+on conflict (user_id, request_id) where request_id is not null do nothing`,
+		pooldb.UUID(jobID), pooldb.UUID(userID), pooldb.S(ji.Tag), pooldb.S(ji.Priority),
+		ji.EstPromptTokens, ji.EstCtxNeeded, optStr(ji.ConvKey),
+		pooldb.UUID(ji.RequestID), pooldb.UUID(routerID)))
+}
+
+// dedupeExisting returns the existing job id for (userID, requestID) and its
+// age in ms; ok=false when there is no such job.
+func (s *Server) dedupeExisting(ctx context.Context, userID, requestID string) (string, int64, bool) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(
+		"select id, extract(epoch from (now() - created_at)) * 1000 from queue_jobs where user_id = %s and request_id = %s",
+		pooldb.UUID(userID), pooldb.UUID(requestID)))
+	if err != nil || len(rows) == 0 {
+		return "", 0, false
+	}
+	f := strings.Split(rows[0], ",")
+	if len(f) < 2 {
+		return "", 0, false
+	}
+	age, err := strconv.ParseFloat(f[1], 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return f[0], int64(age), true
 }
 
 // validateJobIntake enforces the catalog §4 constraints (metadata only; D-G5 id
