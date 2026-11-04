@@ -118,7 +118,8 @@ func TestEnvOverride(t *testing.T) {
 
 func TestBatchWeightInvalidFallsBack(t *testing.T) {
 	setEnv(t)
-	for _, bad := range []string{"abc", "-1", "0", "1e30"} {
+	// above 1 would count batch consumption more than live: out of range
+	for _, bad := range []string{"abc", "-1", "0", "1e30", "2", "100"} {
 		t.Setenv("POOL_BATCH_WEIGHT", bad)
 		cfg, err := Load()
 		if err != nil {
@@ -127,6 +128,19 @@ func TestBatchWeightInvalidFallsBack(t *testing.T) {
 		if cfg.BatchWeight != DefaultBatchWeight {
 			t.Errorf("BatchWeight with %s = %v, want the default %v", bad, cfg.BatchWeight, DefaultBatchWeight)
 		}
+	}
+}
+
+func TestBatchWeightBoundary(t *testing.T) {
+	setEnv(t)
+	// 1 is in range: batch consumption counts the same as live (no reward)
+	t.Setenv("POOL_BATCH_WEIGHT", "1")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with POOL_BATCH_WEIGHT=1: %v", err)
+	}
+	if cfg.BatchWeight != 1 {
+		t.Errorf("BatchWeight = %v, want 1", cfg.BatchWeight)
 	}
 }
 

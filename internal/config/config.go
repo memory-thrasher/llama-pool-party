@@ -179,15 +179,16 @@ func atoi(v string, def int) int {
 	return n
 }
 
-// atof parses v as a positive float, falling back to def when v is empty or
-// not a positive number (POOL_BATCH_WEIGHT).
+// atof parses v as a float in (0, 1], falling back to def when v is empty or
+// out of range (POOL_BATCH_WEIGHT): a weight above 1 would count batch
+// consumption MORE than live, inverting the reward-for-batching intent.
 func atof(v string, def float64) float64 {
 	if v == "" {
 		return def
 	}
 	var n float64
 	_, err := fmt.Sscanf(v, "%g", &n)
-	if err != nil || n <= 0 || n > 100 {
+	if err != nil || n <= 0 || n > 1 {
 		return def
 	}
 	return n
