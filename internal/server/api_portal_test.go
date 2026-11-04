@@ -94,7 +94,8 @@ func TestPortal_LoginHappyPath(t *testing.T) {
 			sc = c.String()
 		}
 	}
-	if !strings.Contains(sc, "HttpOnly") || !strings.Contains(sc, "SameSite=Lax") || !strings.Contains(sc, "Path=/") {
+	if !strings.Contains(sc, "HttpOnly") || !strings.Contains(sc, "Secure") ||
+		!strings.Contains(sc, "SameSite=Lax") || !strings.Contains(sc, "Path=/") {
 		io.Copy(io.Discard, loginResp.Body)
 		loginResp.Body.Close()
 		t.Fatalf("cookie attrs wrong: %s", sc)

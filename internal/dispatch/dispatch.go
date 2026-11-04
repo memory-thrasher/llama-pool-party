@@ -535,8 +535,12 @@ func (d *Dispatcher) sweep() {
 	}
 
 	// Housekeeping: expired portal session rows (WS-14, D-A5 durable state).
+	// Bounded: this runs on the dispatch loop's goroutine, and a hung psql
+	// here would stall the whole dispatch plane.
 	if d.housekeep != nil {
-		d.housekeep(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.housekeep(ctx)
+		cancel()
 	}
 }
 

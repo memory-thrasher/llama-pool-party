@@ -79,7 +79,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: portalCookieName, Value: cookie, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(ttl / time.Second)})
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: int(ttl / time.Second)})
 	writeJSON(w, http.StatusOK, struct {
 		OK bool `json:"ok"`
 	}{true})
@@ -92,7 +92,7 @@ func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	// Clear the cookie; a 200 no-op when the session is already gone.
 	http.SetCookie(w, &http.Cookie{Name: portalCookieName, Value: "", Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	writeJSON(w, http.StatusOK, struct {
 		OK bool `json:"ok"`
 	}{true})
@@ -127,6 +127,7 @@ where p.token_hash = %s
 func (s *Server) sweepPortalSessions(ctx context.Context) {
 	n, err := s.db.Count(ctx, "with swept as (delete from portal_sessions where expires_at < now() returning 1) select count(*) from swept")
 	if err != nil {
+		s.logf("portal: session sweep: %v", err)
 		return
 	}
 	if n > 0 {
@@ -214,7 +215,8 @@ func (s *Server) handlePortalMe(w http.ResponseWriter, r *http.Request) {
 	// Models: one row per (router, model); exclusion mark per the caller's
 	// user (D-F1). tags are chr(1)-joined so psql row splitting is safe.
 	mrows, err := s.db.Query(ctx, fmt.Sprintf(`
-select rm.model_id, rm.status, array_to_string(rm.tags, chr(1)), coalesce(e.excluded, false)
+select format('%%s' || chr(1) || '%%s' || chr(1) || '%%s' || chr(1) || '%%s',
+               rm.model_id, rm.status, array_to_string(rm.tags, chr(1)), coalesce(e.excluded, false))
 from router_models rm
 join routers rt on rt.id = rm.router_id
 left join exclusions e on e.owner_id = %s and e.router_id = rm.router_id and e.model_id = rm.model_id
@@ -222,7 +224,8 @@ where rt.owner_id = %s and rt.deleted_at is null
 order by rm.model_id, rt.id`, pooldb.UUID(userID), pooldb.UUID(userID)))
 	if err == nil {
 		for _, row := range mrows {
-			mf := strings.Split(row, ",")
+			// chr(1) separators: a model id with a comma must not shift the fields
+			mf := strings.Split(row, "\x01")
 			if len(mf) < 3 {
 				continue
 			}
