@@ -190,6 +190,29 @@ create table if not exists exclusions (
 );
 comment on table exclusions is 'Per-user exclusion marks, set via load/unload on the router (D-F1).';
 
+-- v1 amendment (pre-release, WS-14): portal cookie sessions (D-J2). The
+-- cookie value is 256-bit random; only its sha256 is stored (anti-memory).
+-- Rows are durable state (D-A5): a restart does not kill live sessions.
+create table if not exists portal_sessions (
+    id          uuid primary key default gen_random_uuid(),
+    user_id     uuid not null references users(id) on delete cascade,
+    token_hash  text not null,
+    created_at  timestamptz not null default now(),
+    expires_at  timestamptz not null
+);
+create index if not exists portal_sessions_token_hash_idx on portal_sessions (token_hash);
+create index if not exists portal_sessions_expires_idx on portal_sessions (expires_at);
+comment on table portal_sessions is 'Portal cookie sessions; sha256 of the cookie value only (D-J2).';
+
+-- v1 amendment (pre-release, WS-14): per-user priority model list (D-D5).
+-- Stored here; honored in dispatch from WS-15/follow-up.
+create table if not exists user_settings (
+    user_id         uuid primary key references users(id) on delete cascade,
+    priority_models text[] not null default '{}',
+    updated_at      timestamptz not null default now()
+);
+comment on table user_settings is 'Per-user settings; priority_models (D-D5) honored in dispatch from WS-15.';
+
 -- Seed rows: the six default size classes (D-B3).
 -- min inclusive, max exclusive; xs has no min; 2xl has no max.
 insert into classes (id, kind, size_bucket, capability, min_params, max_params)

@@ -21,7 +21,12 @@ func (s *Server) handleAdminInviteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	s.adminInviteUser(w, r, userID)
+}
 
+// adminInviteUser is the shared invite core (WS-13 /api and WS-14 portal
+// mirror); callers have authenticated and checked the admin role.
+func (s *Server) adminInviteUser(w http.ResponseWriter, r *http.Request, userID string) {
 	var req inviteUserReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -89,7 +94,12 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	s.adminListUsers(w, r, userID)
+}
 
+// adminListUsers is the shared user-list core (WS-13 /api and WS-14 portal
+// mirror); callers have authenticated and checked the admin role.
+func (s *Server) adminListUsers(w http.ResponseWriter, r *http.Request, userID string) {
 	ctx := r.Context()
 	rows, err := s.db.Query(ctx, "select id, email, display_name, role, status, created_at, activated_at from users order by created_at desc")
 	if err != nil {
@@ -147,7 +157,12 @@ func (s *Server) handleAdminSuspendUser(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	s.adminSuspendUser(w, r, userID)
+}
 
+// adminSuspendUser is the shared suspend core; callers have authenticated
+// and checked the admin role.
+func (s *Server) adminSuspendUser(w http.ResponseWriter, r *http.Request, userID string) {
 	id := r.PathValue("id")
 	if pooldb.UUID(id) == "NULL" {
 		http.Error(w, "bad id", http.StatusBadRequest)
@@ -193,7 +208,12 @@ func (s *Server) handleAdminActivateUser(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	s.adminActivateUser(w, r, userID)
+}
 
+// adminActivateUser is the shared activate core; callers have authenticated
+// and checked the admin role.
+func (s *Server) adminActivateUser(w http.ResponseWriter, r *http.Request, userID string) {
 	id := r.PathValue("id")
 	if pooldb.UUID(id) == "NULL" {
 		http.Error(w, "bad id", http.StatusBadRequest)
@@ -349,7 +369,12 @@ func (s *Server) handleMeCreateToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	s.createTokenCore(w, r, userID)
+}
 
+// createTokenCore is the shared token-create core (WS-13 /api, WS-14 portal):
+// freeTextOK name, unique per user, plaintext shown once in the 201 body.
+func (s *Server) createTokenCore(w http.ResponseWriter, r *http.Request, userID string) {
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -414,9 +439,14 @@ func (s *Server) handleMeRevokeToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	s.revokeTokenCore(w, r, userID, req.TokenID)
+}
 
+// revokeTokenCore is the shared self-revoke-by-id core (WS-13 /api, WS-14
+// portal): re-revoke is a 200 no-op, an unknown id is 404.
+func (s *Server) revokeTokenCore(w http.ResponseWriter, r *http.Request, userID, tokenID string) {
 	ctx := r.Context()
-	active, err := s.db.FirstBool(ctx, fmt.Sprintf("select revoked_at is null from user_tokens where id = %s and user_id = %s", pooldb.UUID(req.TokenID), pooldb.UUID(userID)))
+	active, err := s.db.FirstBool(ctx, fmt.Sprintf("select revoked_at is null from user_tokens where id = %s and user_id = %s", pooldb.UUID(tokenID), pooldb.UUID(userID)))
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -426,7 +456,7 @@ func (s *Server) handleMeRevokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.db.Exec(ctx, fmt.Sprintf("update user_tokens set revoked_at = now() where id = %s", pooldb.UUID(req.TokenID))); err != nil {
+	if err := s.db.Exec(ctx, fmt.Sprintf("update user_tokens set revoked_at = now() where id = %s", pooldb.UUID(tokenID))); err != nil {
 		http.Error(w, "failed to revoke", http.StatusInternalServerError)
 		return
 	}

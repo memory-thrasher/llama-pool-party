@@ -74,7 +74,8 @@ func New(cfg config.Config, db *pooldb.DB, dataDir string, logs io.Writer) *Serv
 		ContIdleMS: cfg.ContIdleMS, ContPreferMS: cfg.ContPreferMS,
 		JobExpiryMS: cfg.JobExpiryMS, RunningCapMS: cfg.RunningCapMS, BodyReady: bodyReady,
 		FairWindowMS: cfg.FairWindowMS, FairTopK: cfg.FairTopK, ParkBackoffMS: cfg.ParkBackoffMS,
-		BatchWeight: cfg.BatchWeight, BatchExpiryMS: cfg.BatchExpiryMS}
+		BatchWeight: cfg.BatchWeight, BatchExpiryMS: cfg.BatchExpiryMS,
+		Housekeep: s.sweepPortalSessions}
 	s.disp = dispatch.New(db, s, opts, s.purgeBody)
 	return s
 }
@@ -107,6 +108,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("POST /api/me/tokens", s.handleMeCreateToken)
 	mux.HandleFunc("POST /api/me/tokens/revoke", s.handleMeRevokeToken)
+
+	// Portal (WS-14): cookie sessions, member self-service, admin mirror
+	mux.HandleFunc("POST /portal/login", s.handlePortalLogin)
+	mux.HandleFunc("POST /portal/logout", s.handlePortalLogout)
+	mux.HandleFunc("GET /portal/me", s.handlePortalMe)
+	mux.HandleFunc("POST /portal/tokens", s.handlePortalCreateToken)
+	mux.HandleFunc("POST /portal/tokens/revoke", s.handlePortalRevokeToken)
+	mux.HandleFunc("GET /portal/settings", s.handlePortalGetSettings)
+	mux.HandleFunc("POST /portal/settings", s.handlePortalPostSettings)
+	mux.HandleFunc("GET /portal/admin/users", s.handlePortalAdminUsers)
+	mux.HandleFunc("POST /portal/admin/users/invite", s.handlePortalAdminInvite)
+	mux.HandleFunc("POST /portal/admin/users/{id}/suspend", s.handlePortalAdminSuspend)
+	mux.HandleFunc("POST /portal/admin/users/{id}/activate", s.handlePortalAdminActivate)
+
+	// SPA fallback (WS-14): the embedded SvelteKit build. Registered last;
+	// the explicit patterns above win on conflict.
+	mux.HandleFunc("GET /{rest...}", s.handlePortalStatic)
 
 	return mux
 }

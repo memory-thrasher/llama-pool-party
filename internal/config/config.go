@@ -67,6 +67,9 @@ const (
 	// DefaultBatchExpiryMS caps how long a priority=batch job may wait before
 	// it fails (POOL_BATCH_EXPIRY_MS, D-H1); live jobs keep DefaultJobExpiryMS.
 	DefaultBatchExpiryMS = 86400000
+	// DefaultPortalSessionTTLMS is the portal cookie session lifetime (D-J2),
+	// ms (POOL_PORTAL_SESSION_TTL_MS). 7 days.
+	DefaultPortalSessionTTLMS = 604800000
 )
 
 // Config is the coordinator's runtime configuration, populated from env vars.
@@ -111,6 +114,9 @@ type Config struct {
 	BatchWeight float64
 	// BatchExpiryMS caps pending/offered priority=batch jobs (POOL_BATCH_EXPIRY_MS).
 	BatchExpiryMS int
+	// PortalSessionTTLMS is the portal cookie session lifetime
+	// (POOL_PORTAL_SESSION_TTL_MS).
+	PortalSessionTTLMS int
 }
 
 // env returns the value of name, or def when unset/empty.
@@ -141,7 +147,8 @@ func Load() (Config, error) {
 		ParkBackoffMS:  atoi(env("POOL_PARK_BACKOFF_MS", ""), DefaultParkBackoffMS),
 		DedupeWindowMS: atoi(env("POOL_DEDUPE_WINDOW_MS", ""), DefaultDedupeWindowMS),
 		BatchWeight:    atof(env("POOL_BATCH_WEIGHT", ""), DefaultBatchWeight),
-		BatchExpiryMS:  atoi(env("POOL_BATCH_EXPIRY_MS", ""), DefaultBatchExpiryMS),
+		BatchExpiryMS:      atoi(env("POOL_BATCH_EXPIRY_MS", ""), DefaultBatchExpiryMS),
+		PortalSessionTTLMS: atoi(env("POOL_PORTAL_SESSION_TTL_MS", ""), DefaultPortalSessionTTLMS),
 	}
 	if cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return cfg, fmt.Errorf("config: invalid COORD_LOG_LEVEL %q", cfg.LogLevel)

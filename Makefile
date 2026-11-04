@@ -25,12 +25,18 @@ endif
 PSQL := psql
 GO   ?= go
 
-.PHONY: all build vet test schema-apply bootstrap clean
+.PHONY: all build vet test web schema-apply bootstrap clean
 
 all: build
 
 build:
 	$(GO) build ./...
+
+# Build the portal SPA into web/build (embedded into the binary via
+# web/embed.go). Requires Node.js + npm. The committed web/build keeps
+# `make build` working without it.
+web:
+	cd web && npm ci && npm run build
 
 vet:
 	$(GO) vet ./...

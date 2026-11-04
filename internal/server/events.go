@@ -282,7 +282,7 @@ func (s *Server) rebuildModels(r *http.Request, routerID string, models []poolpr
 	tags = excluded.tags, n_ctx = excluded.n_ctx, n_embd = excluded.n_embd,
 	n_slots = excluded.n_slots, busy_slots = excluded.busy_slots,
 	status = excluded.status, vram_mb = excluded.vram_mb, updated_at = excluded.updated_at`,
-		pooldb.UUID(rid), pooldb.S(m.ModelID), tagsLiteral(m.Tags), m.NCtx, m.NEmbD, m.NSlots, m.BusySlots,
+		pooldb.UUID(rid), pooldb.S(m.ModelID), textArrayLiteral(m.Tags), m.NCtx, m.NEmbD, m.NSlots, m.BusySlots,
 		pooldb.S(m.Status), vramLiteral(m.VramMB))
 		if err := s.db.Exec(r.Context(), stmt); err != nil {
 			s.logf("events: router_models upsert for %s: %v", rid, err)
@@ -316,11 +316,12 @@ on conflict (class_id, router_id, model_id) do nothing`,
 	}
 }
 
-// tagsLiteral renders a []string as a postgres text[] literal.
-func tagsLiteral(tags []string) string {
-	quoted := make([]string, len(tags))
-	for i, t := range tags {
-		quoted[i] = strings.ReplaceAll(t, "'", "''")
+// textArrayLiteral renders a []string as a postgres text[] literal
+// (callers pre-validate entries: no commas, no control chars).
+func textArrayLiteral(vals []string) string {
+	quoted := make([]string, len(vals))
+	for i, v := range vals {
+		quoted[i] = strings.ReplaceAll(v, "'", "''")
 	}
 	return "'" + "{" + strings.Join(quoted, ",") + "}'"
 }

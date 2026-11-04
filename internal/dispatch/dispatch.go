@@ -186,6 +186,7 @@ type Dispatcher struct {
 	bodyReady      func(jobID string) bool // e2e fix: gates offerNext on the staged body
 
 	log func(format string, args ...any)
+	housekeep func(ctx context.Context) // per-tick housekeeping (portal sessions)
 
 	jobs map[string]*jobState
 	in   chan dispatchOp
@@ -230,6 +231,8 @@ type Opts struct {
 	// ParkBackoffMS is the base parked-job re-offer backoff in ms
 	// (POOL_PARK_BACKOFF_MS); 0 takes the default (500ms).
 	ParkBackoffMS int
+	// Housekeep runs once per sweep tick (WS-14: expired portal sessions).
+	Housekeep func(ctx context.Context)
 }
 
 func (o Opts) withDefaults() Opts {
@@ -284,8 +287,7 @@ func New(db *pooldb.DB, hub RouterHub, opts Opts, purge Purger) *Dispatcher {
 		batchWeight:    opts.BatchWeight,
 		batchExpiry:    time.Duration(opts.BatchExpiryMS) * time.Millisecond,
 		contIdleMS:     time.Duration(opts.ContIdleMS) * time.Millisecond, contPreferMS: time.Duration(opts.ContPreferMS) * time.Millisecond,
-		purge:     purge,
-		bodyReady: opts.BodyReady,
+		purge:     purge, bodyReady: opts.BodyReady, housekeep: opts.Housekeep,
 		jobs:      make(map[string]*jobState),
 		in:        make(chan dispatchOp, 64),
 		stopChan:  make(chan struct{}),
@@ -530,6 +532,11 @@ func (d *Dispatcher) sweep() {
 			pick.contPriority = true
 		}
 		d.offerNext(pick)
+	}
+
+	// Housekeeping: expired portal session rows (WS-14, D-A5 durable state).
+	if d.housekeep != nil {
+		d.housekeep(context.Background())
 	}
 }
 

@@ -18,3 +18,8 @@
 
 # Run artifacts
 *.log
+
+# Portal SPA: node_modules and the svelte-kit scratch dir are never committed;
+# web/build IS committed (the go:embed tree, keeps the binary self-contained).
+web/node_modules/
+web/.svelte-kit/
