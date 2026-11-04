@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	// Admin endpoints
 	mux.HandleFunc("POST /api/admin/users/invite", s.handleAdminInviteUser)
 	mux.HandleFunc("GET /api/admin/users", s.handleAdminListUsers)
+	mux.HandleFunc("GET /api/admin/metrics", s.handleAdminMetrics)
 	mux.HandleFunc("POST /api/admin/users/{id}/suspend", s.handleAdminSuspendUser)
 	mux.HandleFunc("POST /api/admin/users/{id}/activate", s.handleAdminActivateUser)
 	mux.HandleFunc("POST /api/admin/tokens/revoke", s.handleAdminRevokeToken)
@@ -113,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /portal/login", s.handlePortalLogin)
 	mux.HandleFunc("POST /portal/logout", s.handlePortalLogout)
 	mux.HandleFunc("GET /portal/me", s.handlePortalMe)
+	mux.HandleFunc("GET /portal/metrics", s.handlePortalMetrics)
 	mux.HandleFunc("POST /portal/tokens", s.handlePortalCreateToken)
 	mux.HandleFunc("POST /portal/tokens/revoke", s.handlePortalRevokeToken)
 	mux.HandleFunc("GET /portal/settings", s.handlePortalGetSettings)

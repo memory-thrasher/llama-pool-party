@@ -629,10 +629,11 @@ func TestE2E_Continuity_PreTokenNoPoison(t *testing.T) {
 	}
 	must(t, frB.AcceptAndServe(ctx, job2, len(body), convKey, ndjson))
 	waitRecord(t, env, ctx, job2, 15*time.Second)
-	// The bounce writes its own failed records row; the final row is the
-	// completion. The hinted router bounced and frB served: 'cold'.
+	// One records row per job (D-I3): the pre_token bounce writes none, the
+	// completion writes the single row. The hinted router bounced and frB
+	// served: 'cold'.
 	rows, err := env.db.Query(ctx, fmt.Sprintf(
-		"select cont_outcome from records where job_id = %s and ok = true", pooldb.UUID(job2)))
+		"select cont_outcome from records where job_id = %s", pooldb.UUID(job2)))
 	must(t, err)
 	if len(rows) != 1 {
 		t.Fatalf("completion rows = %d, want 1", len(rows))

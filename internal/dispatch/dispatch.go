@@ -1223,7 +1223,9 @@ func (d *Dispatcher) errorReport(op dispatchOp, errOut chan error) {
 	}
 	switch op.stage {
 	case poolproto.StagePreToken:
-		// Hop-on-error (D-G1): record, then re-offer within the class.
+		// Hop-on-error (D-G1): re-offer within the class. D-I3: the job's
+		// single records row is written at the terminal, so a bounce writes
+		// none (a hop row would leave the job with more than one row).
 		if j.Status != stOffered && j.Status != stRunning {
 			d.logf("dispatch: stale pre_token error for job %s", op.jobID)
 			return
@@ -1251,9 +1253,6 @@ func (d *Dispatcher) errorReport(op dispatchOp, errOut chan error) {
 			// was silently skipped).
 			j.BodyPulled = false
 		}
-		d.records(j, false, op.code,
-			firstIntPtr(op.pt), firstIntPtr(op.rt),
-			firstIntPtr(op.tq), firstIntPtr(op.ts))
 		d.logf("dispatch: job %s pre-token %s; re-offering (%d/%d bounces)", j.JobID, op.code, j.Bounces, d.maxBounces)
 		d.offerNext(j)
 	case poolproto.StageMidStream:
