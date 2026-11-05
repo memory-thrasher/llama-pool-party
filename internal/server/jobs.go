@@ -135,12 +135,13 @@ update queue_jobs set request_id = null where id = %s and user_id = %s
 func (s *Server) insertJob(ctx context.Context, userID, routerID string, ji poolproto.JobIntake, jobID string) error {
 	return s.db.Exec(ctx, fmt.Sprintf(`
 insert into queue_jobs (id, user_id, class_id, priority, est_prompt_tokens, est_ctx_needed,
-                       conv_key, status, request_id, originating_router_id, created_at)
-values (%s, %s, %s, %s, %d, %d, %s, 'pending', %s, %s, now())
+                       conv_key, status, request_id, originating_router_id, created_at,
+                       origin_template_hash)
+values (%s, %s, %s, %s, %d, %d, %s, 'pending', %s, %s, now(), %s)
 on conflict (user_id, request_id) where request_id is not null do nothing`,
 		pooldb.UUID(jobID), pooldb.UUID(userID), pooldb.S(ji.Tag), pooldb.S(ji.Priority),
 		ji.EstPromptTokens, ji.EstCtxNeeded, optStr(ji.ConvKey),
-		pooldb.UUID(ji.RequestID), pooldb.UUID(routerID)))
+		pooldb.UUID(ji.RequestID), pooldb.UUID(routerID), optStr(ji.OriginTemplateHash)))
 }
 
 // dedupeExisting returns the existing job id for (userID, requestID) and its
@@ -183,6 +184,9 @@ func validateJobIntake(ji poolproto.JobIntake) error {
 	}
 	if ji.ClientHint != nil && len(*ji.ClientHint) > 64 {
 		return fmt.Errorf("intake: client_hint too long")
+	}
+	if ji.OriginTemplateHash != nil && *ji.OriginTemplateHash != "" && !isHex64(*ji.OriginTemplateHash) {
+		return fmt.Errorf("intake: origin_template_hash must be 64 hex or null")
 	}
 	return nil
 }

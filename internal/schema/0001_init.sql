@@ -144,6 +144,7 @@ create table if not exists queue_jobs (
     originating_router_id uuid,              -- router that owns the client socket (D-H2)
     serving_router_id   uuid,              -- current offer/serve target
     accepted_at         timestamptz,       -- offer_accept received (gates body pull + response push)
+    origin_template_hash text,             -- WS-17: SHA-256 of the origin member's chat template (null = origin had no local member)
     created_at         timestamptz not null default now(),
     updated_at        timestamptz not null default now()
 );
@@ -168,6 +169,14 @@ create index if not exists queue_jobs_status_idx on queue_jobs (priority, status
 drop index if exists queue_jobs_request_id_uq;
 create unique index if not exists queue_jobs_request_user_uq on queue_jobs (user_id, request_id) where request_id is not null;
 
+-- v1 amendment (pre-release, WS-17): the origin router's chat template
+-- identity (D-M1/D-M2). The serving router compares it to its own to skip the
+-- cross-template reformat (byte-identical) or run the pipeline. null = the
+-- origin had no local member for the class. Existing databases: add the
+-- column idempotently.
+alter table queue_jobs add column if not exists origin_template_hash text;
+alter table queue_jobs drop constraint if exists queue_jobs_origin_template_hash_check;
+alter table queue_jobs add constraint queue_jobs_origin_template_hash_check check (origin_template_hash is null or length(origin_template_hash) = 64);
 
 
 create table if not exists continuity (

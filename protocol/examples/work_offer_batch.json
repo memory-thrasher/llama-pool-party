@@ -8,6 +8,7 @@
     "deadline_ms": 600000,
     "priority": "batch",
     "source": "queue",
-    "conv_key": null
+    "conv_key": null,
+    "origin_template_hash": null
   }
 }

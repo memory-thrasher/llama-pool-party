@@ -101,6 +101,13 @@ type WorkOffer struct {
 	Priority        string  `json:"priority"` // PriorityLive | PriorityBatch
 	Source          string  `json:"source"`   // SourceQueue | SourceSkip | SourcePin
 	ConvKey         *string `json:"conv_key"` // 64-hex continuity key, or nil
+
+	// OriginTemplateHash (WS-17, D-M1): SHA-256 of the origin router's local
+	// member's chat template, or nil when the origin had no local member for
+	// the class. The serving router compares it to its own to skip the
+	// cross-template reformat (byte-identical) or run the pipeline. Old routers
+	// ignore the field (json tolerance).
+	OriginTemplateHash *string `json:"origin_template_hash"`
 }
 
 // OfferAccept is the router's short-lease commit (catalog §3.4).
@@ -196,6 +203,11 @@ type JobIntake struct {
 	Priority        string  `json:"priority"` // PriorityLive | PriorityBatch
 	ConvKey         *string `json:"conv_key"`
 	ClientHint      *string `json:"client_hint"` // e.g. harness name; metadata only
+
+	// OriginTemplateHash (WS-17, D-M1): SHA-256 of the origin router's local
+	// member's chat template, or nil when the origin has no local member for
+	// the class. Optional; an old coordinator ignores the field.
+	OriginTemplateHash *string `json:"origin_template_hash"`
 }
 
 // ClassAdvertisement is the body of GET /pool/classes (catalog §6, D-C8).

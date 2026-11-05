@@ -38,6 +38,11 @@
       "description": "Optional client/harness identifier for records, e.g. \"pi\". Metadata only, capped at 64 chars.",
       "type": ["string", "null"],
       "maxLength": 64
+    },
+    "origin_template_hash": {
+      "description": "WS-17 (D-M1): SHA-256 (64 hex) of the origin router's local member's chat template, or null when the origin has no local member for the class. Optional and additive; an old coordinator ignores the field.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
     }
   },
   "additionalProperties": false,

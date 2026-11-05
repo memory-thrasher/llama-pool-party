@@ -342,6 +342,57 @@ func (fr *FakeRouter) IntakeMetaP(ctx context.Context, reqID, tag string, estPro
 	return bodyResp.JobID, resp.StatusCode, nil
 }
 
+// IntakeMetaOT posts a metadata intake with origin_template_hash set (WS-17,
+// D-M1): the serving router reads it from the work_offer to skip (byte-
+// identical) or reformat the body. "" = null (origin had no local member).
+func (fr *FakeRouter) IntakeMetaOT(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string, originTemplateHash string) (string, int, error) {
+	ji := poolproto.JobIntake{
+		RequestID: reqID, Tag: tag, EstPromptTokens: estPrompt, EstCtxNeeded: estCtx,
+		Priority: poolproto.PriorityLive,
+	}
+	if convKey != nil {
+		ji.ConvKey = convKey
+	}
+	if originTemplateHash != "" {
+		ji.OriginTemplateHash = &originTemplateHash
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fr.baseURL+"/pool/jobs",
+		bytes.NewReader(jsonBytes(ji)))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+fr.token)
+	req.Header.Set("X-Pool-Router-Id", fr.id)
+	resp, err := fr.client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	var bodyResp struct {
+		JobID string `json:"job_id"`
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	_ = json.Unmarshal(raw, &bodyResp)
+	if bodyResp.JobID == "" {
+		return "", resp.StatusCode, fmt.Errorf("intake: empty job id: status %d: %s", resp.StatusCode, truncate(raw, 200))
+	}
+	return bodyResp.JobID, resp.StatusCode, nil
+}
+
+// IntakeOT posts the metadata intake with origin_template_hash and stages the
+// body (WS-17, D-M1).
+func (fr *FakeRouter) IntakeOT(ctx context.Context, reqID, tag string, estPrompt, estCtx int, convKey *string, originTemplateHash string, body []byte) (string, error) {
+	jobID, _, err := fr.IntakeMetaOT(ctx, reqID, tag, estPrompt, estCtx, convKey, originTemplateHash)
+	if err != nil {
+		return "", err
+	}
+	if err := fr.StageBody(ctx, jobID, body); err != nil {
+		return "", err
+	}
+	return jobID, nil
+}
+
 // PostExclusion posts an exclusion_update event (D-F1, catalog 3.10): the
 // owner marks a model excluded (true) or un-excluded (false) on this router.
 func (fr *FakeRouter) PostExclusion(ctx context.Context, modelID string, excluded bool) error {

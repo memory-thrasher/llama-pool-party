@@ -286,6 +286,75 @@ func TestE2E_HappyPath_CrossMember(t *testing.T) {
 	}
 }
 
+// TestE2E_OriginTemplateHash_Offer (WS-17, D-M1): the intake carries the
+// origin's chat template identity; it is persisted on queue_jobs and replayed
+// on the work_offer so the serving router can skip (byte-identical) or
+// reformat the body. A second intake with a null hash is stored as null.
+func TestE2E_OriginTemplateHash_Offer(t *testing.T) {
+	env := newE2E(t)
+
+	// frB: loaded, free, accepts.
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 131072, 2, 0, poolproto.ModelLoaded)
+	frB.SetPolicy(AcceptPolicy{})
+	must(t, frB.Connect(context.Background()))
+
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 1, poolproto.ModelLoaded)
+	frA.SetPolicy(AcceptPolicy{})
+	must(t, frA.Connect(context.Background()))
+
+	ctx := context.Background()
+	tmplHash := randHex(32) // 64-hex template identity
+	body := []byte(`WS17-BODY-` + strings.Repeat("y", 1024))
+
+	// 1. intake with the hash; the column is persisted.
+	jobID, err := frA.IntakeOT(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, tmplHash, body)
+	must(t, err)
+	rows, err := env.db.Query(ctx, fmt.Sprintf(
+		"select origin_template_hash from queue_jobs where id = %s", pooldb.UUID(jobID)))
+	must(t, err)
+	if len(rows) != 1 || rows[0] != tmplHash {
+		t.Fatalf("queue_jobs.origin_template_hash = %v, want %s", rows, tmplHash)
+	}
+
+	// 2. the free member is offered; the offer replays the hash.
+	evB, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evB); of.JobID != jobID {
+		t.Fatalf("fr-b offer for job %s, want %s", of.JobID, jobID)
+	}
+	of := offerOf(t, evB)
+	if of.OriginTemplateHash == nil || *of.OriginTemplateHash != tmplHash {
+		t.Fatalf("work_offer.origin_template_hash = %v, want %s", of.OriginTemplateHash, tmplHash)
+	}
+
+	// serve to completion (keeps the queue clean).
+	ndjson := []string{
+		`{"choices":[{"delta":{"content":"WS17-RESP"}}]}`,
+		"data: [DONE]",
+	}
+	must(t, frB.AcceptAndServe(ctx, jobID, len(body), "", ndjson))
+	waitRecord(t, env, ctx, jobID, 15*time.Second)
+
+	// 3. a null hash is stored as null and replayed as null.
+	jobID2, err := frA.IntakeOT(ctx, pooldb.NewUUID(), "pool-text-md", 128, 4096, nil, "", body)
+	must(t, err)
+	nullRows, err := env.db.Query(ctx, fmt.Sprintf(
+		"select origin_template_hash is null from queue_jobs where id = %s", pooldb.UUID(jobID2)))
+	must(t, err)
+	if len(nullRows) != 1 || nullRows[0] != "t" {
+		t.Fatalf("null-hash queue_jobs.origin_template_hash is null = %v, want [t]", nullRows)
+	}
+	evB2, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of2 := offerOf(t, evB2); of2.OriginTemplateHash != nil {
+		t.Fatalf("null-hash work_offer.origin_template_hash = %v, want null", *of2.OriginTemplateHash)
+	}
+	must(t, frB.AcceptAndServe(ctx, jobID2, len(body), "", ndjson))
+	waitRecord(t, env, ctx, jobID2, 15*time.Second)
+}
+
 // TestE2E_Bounce_SecondAccepts: the first candidate (largest ctx) rejects
 // with no_slot; the coordinator parks it and the second candidate accepts and
 // completes.

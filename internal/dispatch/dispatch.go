@@ -71,6 +71,10 @@ type jobState struct {
 	EstCtxNeeded    int
 	ConvKey         string // "" = null
 
+	// OriginTemplateHash (WS-17, D-M1): "" = null. Replayed on the work_offer
+	// so the serving router can skip (byte-identical) or reformat the body.
+	OriginTemplateHash string
+
 	OriginRouter string
 
 	Status string
@@ -957,6 +961,7 @@ func (d *Dispatcher) offerNext(j *jobState) {
 			EstPromptTokens: j.EstPromptTokens, EstCtxNeeded: j.EstCtxNeeded,
 			DeadlineMS: nil, Priority: j.Priority,
 			Source: source, ConvKey: convKeyPtr(j.ConvKey),
+			OriginTemplateHash: convKeyPtr(j.OriginTemplateHash),
 		})}
 		data, err := json.Marshal(env)
 		if err != nil {
@@ -1093,7 +1098,7 @@ func (d *Dispatcher) register(jobID string, errOut chan error) {
 	defer d.ack(errOut, nil)
 	rows, err := d.db.Query(context.Background(), fmt.Sprintf(`
 select user_id, class_id, priority, est_prompt_tokens, est_ctx_needed, conv_key,
-       status, originating_router_id, serving_router_id, created_at
+       status, originating_router_id, serving_router_id, created_at, origin_template_hash
 from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 	if err != nil {
 		d.ack(errOut, fmt.Errorf("dispatch register %s: %w", jobID, err))
@@ -1105,7 +1110,7 @@ from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 	}
 	r := rows[0]
 	f := strings.Split(r, ",")
-	if len(f) < 10 {
+	if len(f) < 11 {
 		d.ack(errOut, fmt.Errorf("dispatch: bad job row %s: %q", jobID, r))
 		return
 	}
@@ -1120,6 +1125,7 @@ from queue_jobs where id = %s`, pooldb.UUID(jobID)))
 		ConvKey: f[5], Status: f[6],
 		OriginRouter: f[7],
 		CreatedAt:    created, UserCreatedAt: created,
+		OriginTemplateHash: f[10],
 	}
 	if err := d.fixUserCreatedAt(d.jobs[jobID]); err != nil {
 		d.logf("dispatch: fix user created_at for job %s: %v", jobID, err)

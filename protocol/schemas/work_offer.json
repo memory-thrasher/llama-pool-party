@@ -52,6 +52,11 @@
           "description": "Continuity key if known: SHA-256 (64 hex) of the first 8 KiB of the raw client payload (D-E1). null for new conversations and batch items.",
           "type": ["string", "null"],
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "origin_template_hash": {
+          "description": "WS-17 (D-M1): SHA-256 (64 hex) of the origin router's local member's chat template, or null when the origin had no local member for the class. The serving router compares it to its own to skip the cross-template reformat (byte-identical) or run the pipeline. Optional and additive; old routers ignore it.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
         }
       },
       "additionalProperties": false,
