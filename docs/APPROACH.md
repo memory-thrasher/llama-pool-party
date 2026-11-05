@@ -185,19 +185,20 @@ Plain HTTPS, no websockets:
 
 Why the coordinator is a separate repo and not C++: it is a loop of external API calls with a database and a web portal - exactly the kind of work llama.cpp's own development guidelines exclude from its C++ server code. A Go binary + postgres is boring to operate on a lightweight VM, and boring is what we want from the thing that holds everyone's tokens.
 
-## 12. Testing
+## 12. Testing (as implemented)
 
-- Upstream's server test suite (pytest) runs as the regression net for "the unchanged flow stays unchanged".
-- **Acceptance test for the MVP:** stock pi, zero configuration changes, pointed at a member router, sees pool classes, routes a request end to end (including to another member), and compacts dynamically on an induced overflow.
-- Coordinator tested against a **fake router** (scripted offers, bounces, disconnects, mid-stream deaths).
-- Template reformatting: CI corpus of captured conversations (agent turns, tool calls, reasoning blocks, multimodal parts) with a per-template round-trip pass report.
-- Protocol conformance between fork and coordinator in CI.
+- **Live acceptance slice** (the MVP acceptance test, scripted and re-runnable): stock pi, zero configuration changes, pointed at a member router, sees pool classes in `--list-models`, a local request is served locally (no coordinator round trip), a cross-member request is served by the other member (record `ok=true`, `served_by != origin`), an oversized prompt compacts dynamically and succeeds, and a concrete (non-pool) model request never touches the pool. Plus: no leftover bodies, and an anti-memory canary absent from all logs and the data dir. 14 checks, green at every banked HEAD.
+- Upstream's server test suite (pytest) runs as the regression net for "the unchanged flow stays unchanged"; the pool unit suites (dispatch, classes, link, status) extend it.
+- Coordinator tested against a **fake router** (scripted offers, bounces, disconnects, mid-stream deaths) and a **fake coordinator** on the fork side; Go e2e suites cover intake, dedupe, fairness, batches, continuity, restart, records, and the anti-memory canary.
+- Template reformatting: CI corpus of real Qwen3/Llama-3.1/Mistral template texts with agent turns, tool calls (incl. parallel), reasoning blocks, and multimodal parts, a per-template round-trip pass report, and the pinned cross-template multimodal limitation. 104 assertions.
+- The pool web panels have browser-level Playwright E2E (connected / not-configured / degraded states) on top of the component (vitest) and Storybook coverage.
 
 ## 13. Operations
 
-- Coordinator: one VM, one Go binary + postgres. Restart-safe: durable state in postgres; in-flight dispatch re-announced on restart.
+- Coordinator: one VM, one Go binary + postgres. Restart-safe: durable state in postgres; in-flight dispatch re-announced on restart (offered/running jobs terminal-fail as `coordinator_restart`, pending jobs re-register).
 - Router offline = ordinary router; coordinator down = pool dark, local service unaffected.
 - Moderators: portal for membership/labels/priorities; postgres direct access for bootstrap and recovery.
+- Full runbook (all configuration knobs on both sides, body lifecycle, backup, log hygiene): `ops/OPERATIONS.md` at the workspace root.
 
 ## 14. Scope
 
