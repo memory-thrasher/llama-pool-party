@@ -255,6 +255,52 @@ func TestWS12_Dedupe_CrossUser(t *testing.T) {
 	}
 }
 
+// TestWS12_Dedupe_ConcurrentIdentical: two byte-identical intakes of the same
+// user racing at the same instant collapse onto ONE job. The partial unique
+// index (user_id, request_id) lets exactly one insert win; the loser catches
+// the conflict and returns the winner's job with 200. Pinned: both responses
+// 2xx, both job ids equal, exactly one queue_jobs row for the request_id.
+func TestWS12_Dedupe_ConcurrentIdentical(t *testing.T) {
+	env := newE2EWith(t, e2eOpts{dedupeWindowMS: 300000})
+	ctx := context.Background()
+	_, tokenA := setupAuthUser(t, env, "ws12-race-a@example.com", "WS12 Race A", "member", "active")
+	frA := NewFakeRouter(env.baseURL, tokenA, "ws12-race-a", "fake-race-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 0, poolproto.ModelLoaded)
+	must(t, frA.Connect(ctx))
+
+	reqID := pooldb.NewUUID()
+	type result struct {
+		jobID  string
+		status int
+		err    error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			jobID, status, err := frA.IntakeMeta(ctx, reqID, "pool-text-md", 128, 2048, nil)
+			results <- result{jobID: jobID, status: status, err: err}
+		}()
+	}
+
+	jobs := make([]string, 2)
+	for i := 0; i < 2; i++ {
+		r := <-results
+		must(t, r.err)
+		if r.status != http.StatusCreated && r.status != http.StatusOK {
+			t.Fatalf("intake %d status = %d, want 2xx (201 or 200)", i, r.status)
+		}
+		jobs[i] = r.jobID
+	}
+	if jobs[0] != jobs[1] {
+		t.Fatalf("concurrent identical intakes returned different jobs: %s vs %s", jobs[0], jobs[1])
+	}
+	n, err := env.db.Count(ctx, "select count(*) from queue_jobs where request_id = "+pooldb.UUID(reqID))
+	must(t, err)
+	if n != 1 {
+		t.Fatalf("queue_jobs rows for request_id = %d, want 1 (the race collapsed to one job)", n)
+	}
+}
+
 // servedBy returns the (router_id, model_id) from a job's records row.
 func servedBy(t *testing.T, env *e2eEnv, ctx context.Context, jobID string) (router, model string) {
 	t.Helper()

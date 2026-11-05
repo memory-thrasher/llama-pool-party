@@ -372,18 +372,19 @@ func makeCanary40(t *testing.T) string {
 	return "WS15C" + string(b)
 }
 
-// assertCanaryAbsentInDB walks every text/jsonb/json column of the
-// coordinator's durable tables and fails if the canary appears in any of
-// them (D-I1: no request content in the store).
+// assertCanaryAbsentInDB walks every text/jsonb/json column of every table in
+// the public schema and fails if the canary appears in any of them (D-I1: no
+// request content in the store). The table set is walked from
+// information_schema, not a hard-coded list: a new durable table cannot
+// silently drop out of the check.
 func assertCanaryAbsentInDB(t *testing.T, env *e2eEnv, ctx context.Context, canary string) {
 	t.Helper()
 	cols, err := env.db.Query(ctx, `
-select table_name || '.' || column_name
-from information_schema.columns
-where table_schema = 'public'
-  and table_name in ('users','user_tokens','routers','router_models','classes','class_members',
-                     'records','queue_jobs','continuity','exclusions','batches','portal_sessions','user_settings')
-  and data_type in ('text','jsonb','json','character varying')
+select c.table_name || '.' || c.column_name
+from information_schema.columns c
+join pg_tables p on p.schemaname = c.table_schema and p.tablename = c.table_name
+where c.table_schema = 'public'
+  and c.data_type in ('text','jsonb','json','character varying')
 order by 1`)
 	must(t, err)
 	if len(cols) == 0 {
