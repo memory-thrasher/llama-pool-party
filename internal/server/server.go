@@ -128,7 +128,31 @@ func (s *Server) Handler() http.Handler {
 	// the explicit patterns above win on conflict.
 	mux.HandleFunc("GET /{rest...}", s.handlePortalStatic)
 
-	return mux
+	return statusLog(s, mux)
+}
+
+// statusLog logs every failure code sent to a caller (router or portal):
+// method, path, status, latency. No body content (D-I1).
+func statusLog(s *Server, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		if sw.status >= 400 {
+			s.logf("http failure: %s %s -> %d (%d ms)",
+				r.Method, r.URL.Path, sw.status, time.Since(start).Milliseconds())
+		}
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 // Run serves the HTTP plane on addr until ctx is cancelled. The dispatcher
