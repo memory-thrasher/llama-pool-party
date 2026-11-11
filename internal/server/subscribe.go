@@ -20,6 +20,7 @@ import (
 //     respond with a JSON array of work_offer envelopes (possibly empty);
 //     heartbeat comments keep proxies from timing out the link.
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	userID, err := s.authUser(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -31,6 +32,11 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.routerMustOwn(w, r, userID, routerID)
+	// the three calls above are the psql-per-query phase (no connection
+	// pool); a slow host can blow the router's 60s subscribe deadline here
+	if d := time.Since(start); d > time.Second {
+		s.logf("subscribe: pre-200 phase slow: %v (auth + router checks)", d)
+	}
 
 	switch r.Header.Get("Accept") {
 	case "text/event-stream":
@@ -51,6 +57,7 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, routerID strin
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
+	s.logf("subscribe: 200 sent (router %s)", routerID[:13])
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
 		flusher.Flush()
