@@ -155,6 +155,18 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// the wrapper must not break interface assertions on the wrapped writer: the
+// SSE subscribe handler relies on http.Flusher to deliver headers and
+// heartbeats. Regression 2026-11-11: without this, w.(http.Flusher) in
+// serveSSE is nil, the stream delivers zero bytes, and the router's SSE
+// rounds all time out (this broke the pool link in the 2026-11-10/11 swap
+// runs and the 2026-11-11 e2e slice)
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Run serves the HTTP plane on addr until ctx is cancelled. The dispatcher
 // starts here and stops on shutdown.
 func (s *Server) Run(ctx context.Context, addr string) error {

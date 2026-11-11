@@ -601,3 +601,49 @@ func TestE2E_ClientDisconnect_FailsJob(t *testing.T) {
 		}
 	}
 }
+
+// TestE2E_SubscribeSSE_DeliversBytes: the SSE subscribe stream must deliver
+// bytes over the real transport - the 200 headers promptly (client.Do
+// returns) and a heartbeat comment within HeartbeatMS + margin. A real
+// connection reader is the only way to catch a broken flush.
+// Regression 2026-11-11: the statusLog middleware's statusWriter did not
+// implement http.Flusher, so serveSSE's flush was a no-op and the stream
+// delivered zero bytes - the router's SSE rounds all timed out (both the
+// 2026-11-10/11 swap rollbacks and the 11-11 e2e slice). The long-poll
+// mode worked, which is why the earlier suites stayed green.
+func TestE2E_SubscribeSSE_DeliversBytes(t *testing.T) {
+	env := newE2E(t)
+	const rid = "11111111-2222-3333-4444-555555555555"
+	frA := NewFakeRouter(env.baseURL, env.token, rid, "sse-flush-probe")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 4096, 1, 0, poolproto.ModelLoaded)
+	must(t, frA.Connect(context.Background()))
+
+	// covers the 200 headers plus the 25s heartbeat comment
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", env.baseURL+"/pool/subscribe", nil)
+	must(t, err)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	req.Header.Set("X-Pool-Proto", "1")
+	req.Header.Set("X-Pool-Router-Id", rid)
+
+	// with the broken flush, this blocks until the context deadline: the
+	// 200 headers never reach the wire
+	start := time.Now()
+	res, err := (&http.Client{}).Do(req)
+	must(t, err)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	if got := time.Since(start); got > 3*time.Second {
+		t.Fatalf("headers took %v (the stream is not flushing)", got)
+	}
+
+	// first byte (the 25s heartbeat comment) before the context deadline
+	buf := make([]byte, 1)
+	if _, err := res.Body.Read(buf); err != nil {
+		t.Fatalf("no bytes on the SSE stream (40s): %v", err)
+	}
+}
