@@ -250,3 +250,30 @@ func TestPickFair_Fairness(t *testing.T) {
 		})
 	}
 }
+
+// TestRunningCapFor pins the D-G2 amendment (2026-11-12, KI-1): the running
+// cap scales with the estimated prompt - a large prompt takes minutes to
+// evaluate and produces no response lines meanwhile (incident: 185981 tokens
+// in 560s against the 5m base cap) - and the scale is capped at the largest
+// advertised context so image-heavy bodies (est = raw bytes/4) cannot
+// inflate it without bound.
+func TestRunningCapFor(t *testing.T) {
+	d := &Dispatcher{runningCap: 5 * time.Minute}
+	base := 5 * time.Minute
+	cases := []struct {
+		name string
+		est  int
+		want time.Duration
+	}{
+		{"no estimate: base only", 0, base},
+		{"small prompt: base + 20s", 5000, base + 20*time.Second},
+		{"incident prompt: 171861 tokens", 171861, base + 171861*runningPerTokenMS*time.Millisecond},
+		{"image-heavy body capped at the largest advertised ctx", 10_000_000, base + runningMaxScaleTokens*runningPerTokenMS*time.Millisecond},
+	}
+	for _, c := range cases {
+		j := &jobState{EstPromptTokens: c.est}
+		if got := d.runningCapFor(j); got != c.want {
+			t.Errorf("%s: runningCapFor = %s, want %s", c.name, got, c.want)
+		}
+	}
+}

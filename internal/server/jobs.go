@@ -388,6 +388,9 @@ func (s *Server) handlePutResponse(w http.ResponseWriter, r *http.Request) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		count++
+		// response activity extends the D-G2 deadline (amended 2026-11-12,
+		// KI-1): the job is alive while it streams, whatever the turn length
+		_ = s.disp.ExtendRunning(jobID)
 		if !pipe.send(line) {
 			// The originating side is gone: abort this push (the router sees
 			// its PUT stream close) and fail the job (D-G4).

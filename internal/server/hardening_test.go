@@ -266,3 +266,101 @@ func TestE2E_BodyGate(t *testing.T) {
 		t.Fatalf("records = %v, want t", rows)
 	}
 }
+
+// TestE2E_RunningCapPromptScaled: a job with a large estimated prompt must not
+// trip the running cap during prompt eval (no lines come out then). The base
+// cap alone (300ms here) would fail it mid-eval - the KI-1 incident (a
+// 171k-token prompt eval took 560s against the 5m base cap).
+func TestE2E_RunningCapPromptScaled(t *testing.T) {
+	env := newE2EWith(t, e2eOpts{runningCapMS: 300})
+
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 1, poolproto.ModelLoaded)
+	frA.SetPolicy(RejectPolicy{Reason: "no_slot"})
+	must(t, frA.Connect(context.Background()))
+
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 131072, 2, 0, poolproto.ModelLoaded)
+	must(t, frB.Connect(context.Background()))
+
+	ctx := context.Background()
+	convKey := hexToken(32)
+	body := []byte(`WS09-SCALE-BODY-` + strings.Repeat("x", 2048))
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 100000, 4096, &convKey, body)
+	must(t, err)
+	rgA, err := frA.OpenResponseGet(ctx, jobID)
+	must(t, err)
+
+	evB, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evB); of.JobID != jobID {
+		t.Fatalf("offer for job %s, want %s", of.JobID, jobID)
+	}
+	// accept + body pull, then hold: a slow prompt eval (no lines)
+	must(t, frB.AcceptAndHold(ctx, jobID))
+
+	// cap = 300ms base + 100000 x 4ms = ~6.9 min: the job must be well past
+	// the base cap and still running
+	time.Sleep(1500 * time.Millisecond)
+	if evA, err := frA.NextEvent(ctx, 500*time.Millisecond); err == nil {
+		t.Fatalf("unexpected envelope while the job should still be running: %+v", evA)
+	}
+	rgA.Close()
+}
+
+// TestE2E_RunningCapActivityExtends: while the serving router streams, the
+// relayed lines extend the D-G2 deadline (KI-1 amendment), so a long
+// generation is never mistaken for a dead push. The base cap alone (300ms
+// here) would fail the job mid-stream and cut the relay.
+func TestE2E_RunningCapActivityExtends(t *testing.T) {
+	env := newE2EWith(t, e2eOpts{runningCapMS: 300})
+
+	frA := NewFakeRouter(env.baseURL, env.token, "fr-a", "fake-a")
+	frA.LoadModel("md-a", []string{"pool-text-md"}, 32768, 1, 1, poolproto.ModelLoaded)
+	frA.SetPolicy(RejectPolicy{Reason: "no_slot"})
+	must(t, frA.Connect(context.Background()))
+
+	frB := NewFakeRouter(env.baseURL, env.token, "fr-b", "fake-b")
+	frB.LoadModel("md-b", []string{"pool-text-md"}, 131072, 2, 0, poolproto.ModelLoaded)
+	must(t, frB.Connect(context.Background()))
+
+	ctx := context.Background()
+	convKey := hexToken(32)
+	body := []byte(`WS09-PACED-BODY-` + strings.Repeat("x", 2048))
+	jobID, err := frA.Intake(ctx, pooldb.NewUUID(), "pool-text-md", 0, 4096, &convKey, body)
+	must(t, err)
+	rgA, err := frA.OpenResponseGet(ctx, jobID)
+	must(t, err)
+
+	evB, err := frB.NextEvent(ctx, 15*time.Second)
+	must(t, err)
+	if of := offerOf(t, evB); of.JobID != jobID {
+		t.Fatalf("offer for job %s, want %s", of.JobID, jobID)
+	}
+	ndjson := []string{
+		`{"choices":[{"delta":{"content":"pace-1"}}]}`,
+		`{"choices":[{"delta":{"content":"pace-2"}}]}`,
+		`{"choices":[{"delta":{"content":"pace-3"}}]}`,
+		`{"choices":[{"delta":{"content":"pace-4"}}]}`,
+		`{"choices":[{"delta":{"content":"pace-5"}}]}`,
+	}
+	// 5 lines at 200ms gaps = ~1s of streaming, crossing the 300ms base cap
+	// several times
+	status, err := frB.AcceptAndServePaced(ctx, jobID, len(body), convKey, ndjson, 200*time.Millisecond)
+	must(t, err)
+	if status != 200 {
+		t.Fatalf("push status = %d, want 200", status)
+	}
+	// all 5 lines reached the origin (no early cap hit)
+	for i := 1; i <= len(ndjson); i++ {
+		select {
+		case line := <-rgA.Lines():
+			if !strings.Contains(line, fmt.Sprintf("pace-%d", i)) {
+				t.Fatalf("relay line %d = %q", i, line)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("relay line %d never arrived", i)
+		}
+	}
+	rgA.Close()
+}

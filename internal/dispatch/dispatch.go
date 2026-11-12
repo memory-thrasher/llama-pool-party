@@ -119,10 +119,23 @@ type jobState struct {
 	LeaseExpiresAt time.Time // zero = no lease armed
 	AcceptedAt     time.Time // zero = offered but not accepted (gates body pull/response push)
 	RunningAt      time.Time // zero = not running yet (the running cap's timestamp, D-G2)
+	DeadlineAt     time.Time // zero = not running yet (D-G2 deadline: prompt-scaled, extended by activity)
+	LastActivity   time.Time // body pull or last relayed response line (D-G2, amended)
 	TerminalAt     time.Time // zero = not terminal yet (memory GC uses this)
 
 	completion poolproto.Completion // stashed from the last completion event
 }
+
+// D-G2 running cap (amended 2026-11-12, KI-1): the cap scales with the
+// estimated prompt - a large prompt takes minutes to evaluate and produces no
+// response lines meanwhile (incident: 185981 tokens in 560s = 3.01 ms/token
+// on the slowest card; the 5m base cap fired mid-eval). Budget 4 ms/token;
+// the scale is capped at the largest advertised context so image-heavy bodies
+// (est = raw bytes/4) cannot inflate the cap without bound.
+const (
+	runningPerTokenMS     = 4
+	runningMaxScaleTokens = 262144
+)
 
 // contHint is the continuity snapshot for a job's conversation (D-E2):
 // the member that last served it, when, and whether that service completed
@@ -144,6 +157,7 @@ const (
 	opError
 	opCompletion
 	opBodyPulled
+	opExtendRunning
 	opFailClientDisconnected
 	opAffinity
 	opInternalReject
@@ -459,6 +473,26 @@ func (d *Dispatcher) FailClientDisconnected(jobID string) error {
 	return d.enqueue(dispatchOp{kind: opFailClientDisconnected, jobID: jobID})
 }
 
+// ExtendRunning pushes the D-G2 deadline out on response activity (amended
+// 2026-11-12, KI-1): while the serving router streams, the job is alive no
+// matter how long the turn takes.
+func (d *Dispatcher) ExtendRunning(jobID string) error {
+	return d.enqueue(dispatchOp{kind: opExtendRunning, jobID: jobID})
+}
+
+func (d *Dispatcher) extendRunning(op dispatchOp, errOut chan error) {
+	defer d.ack(errOut, nil)
+	j := d.jobs[op.jobID]
+	if j == nil || j.Status != stRunning || j.DeadlineAt.IsZero() {
+		return
+	}
+	now := time.Now()
+	j.LastActivity = now
+	if nd := now.Add(d.runningCapFor(j)); nd.After(j.DeadlineAt) {
+		j.DeadlineAt = nd
+	}
+}
+
 // HintEvicted marks the pending jobs whose continuity hint names routerID
 // (D-E4, D-E6): a capacity/unload event dropped the hinted member, so their
 // skip is denied with reason=evicted instead of gone.
@@ -497,15 +531,17 @@ func (d *Dispatcher) sweep() {
 		}
 	}
 
-	// Running cap (D-G2): a running job older than the cap fails with a clean
-	// terminal error. This is the backstop for a serving router that drops
-	// mid-push (the push read errors, the job has no completion) or streams
-	// forever: failJob mirrors the error to the origin and closes its relay
-	// pipe, so the client stream ends structured instead of hanging.
+	// Running cap (D-G2, amended 2026-11-12): a running job past its deadline
+	// fails with a clean terminal error. The deadline starts prompt-scaled at
+	// the body pull (a large prompt evals for minutes without any lines) and
+	// extends on every relayed response line, so a long prompt or a long
+	// generation is safe; this stays the backstop for a serving router that
+	// drops mid-push (failJob mirrors the error to the origin and closes its
+	// relay pipe, so the client stream ends structured instead of hanging).
 	for _, j := range d.jobs {
-		if j.Status == stRunning && !j.RunningAt.IsZero() && now.Sub(j.RunningAt) > d.runningCap {
-			d.logf("dispatch: running cap hit for job %s (running since body pull)", j.JobID)
-			d.failJob(j, poolproto.ErrorOther, fmt.Sprintf("service timeout after %s (D-G2)", d.runningCap),
+		if j.Status == stRunning && !j.DeadlineAt.IsZero() && now.After(j.DeadlineAt) {
+			d.logf("dispatch: running cap hit for job %s (silent for %s)", j.JobID, now.Sub(j.LastActivity).Truncate(time.Second))
+			d.failJob(j, poolproto.ErrorOther, fmt.Sprintf("service timeout after %s (D-G2)", now.Sub(j.RunningAt).Truncate(time.Second)),
 				0, 0, int(now.Sub(j.CreatedAt).Milliseconds()), 0)
 		}
 	}
@@ -1072,6 +1108,8 @@ func (d *Dispatcher) applyOp(op dispatchOp) {
 		d.complete(op, op.errOut)
 	case opBodyPulled:
 		d.bodyPulled(op, op.errOut)
+	case opExtendRunning:
+		d.extendRunning(op, op.errOut)
 	case opFailClientDisconnected:
 		d.failClientDisconnected(op, op.errOut)
 	case opAffinity:
@@ -1494,6 +1532,15 @@ func (d *Dispatcher) purgeBody(j *jobState) {
 	}
 }
 
+// runningCapFor is the D-G2 cap for a job: base cap + prompt-eval budget.
+func (d *Dispatcher) runningCapFor(j *jobState) time.Duration {
+	scale := j.EstPromptTokens * runningPerTokenMS
+	if max := runningMaxScaleTokens * runningPerTokenMS; scale > max {
+		scale = max
+	}
+	return d.runningCap + time.Duration(scale)*time.Millisecond
+}
+
 func (d *Dispatcher) bodyPulled(op dispatchOp, errOut chan error) {
 	defer d.ack(errOut, nil)
 	j := d.jobs[op.jobID]
@@ -1504,6 +1551,8 @@ func (d *Dispatcher) bodyPulled(op dispatchOp, errOut chan error) {
 		j.BodyPulled = true
 		j.Status = stRunning
 		j.RunningAt = time.Now() // the running cap runs from the body pull (D-G2)
+		j.DeadlineAt = j.RunningAt.Add(d.runningCapFor(j))
+		j.LastActivity = j.RunningAt
 		j.LeaseExpiresAt = time.Time{}
 		d.persistStatus(j, stRunning)
 		d.logf("dispatch: job %s body pulled by %s; running", j.JobID, short(j.ServingRouterID))
